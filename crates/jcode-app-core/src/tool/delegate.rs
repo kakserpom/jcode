@@ -3,7 +3,8 @@ use crate::protocol::{
     Request, ServerEvent, default_comm_await_target_statuses,
 };
 use crate::session_delegate_config::{
-    effective_delegate_model, effective_delegate_timeout,
+    effective_delegate_model, effective_delegate_timeout, effective_enabled,
+    validate_model_allowed, allowed_models,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -160,6 +161,11 @@ impl Tool for DelegateTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: DelegateInput = serde_json::from_value(input)?;
 
+        // Check if delegation is enabled for this session
+        if !effective_enabled(&ctx.session_id) {
+            return Ok(ToolOutput::new("Delegation is disabled for this session. Use `configure_delegate(enabled=true)` to enable it.".to_string()));
+        }
+
         // Determine the delegate model: explicit param > session config > file config
         let delegate_model = params
             .model
@@ -172,10 +178,12 @@ impl Tool for DelegateTool {
 
         // Validate the model is in the allowed list (if the list is non-empty)
         if let Some(ref model) = delegate_model {
-            if let Err(msg) = crate::session_delegate_config::validate_model_allowed(model) {
+            if let Err(msg) = validate_model_allowed(&ctx.session_id, model) {
+                let allowed = allowed_models(&ctx.session_id);
                 return Ok(ToolOutput::new(format!(
-                    "Cannot delegate: {}\n\nUse `configure_delegate` to see available models or change the delegate model.",
-                    msg
+                    "Cannot delegate: {}\n\nAvailable models: {}\nUse `configure_delegate` to see available models or change the delegate model.",
+                    msg,
+                    if allowed.is_empty() { "(no restriction — any model)".to_string() } else { allowed.join(", ") }
                 )));
             }
         }
@@ -313,6 +321,15 @@ struct ConfigureDelegateInput {
     /// Pass 0 to clear and fall back to config file value.
     #[serde(default)]
     timeout_minutes: Option<u32>,
+    /// Whether delegation is enabled. Pass empty string, "true", or "false".
+    /// When not provided, the current value is unchanged.
+    #[serde(default)]
+    enabled: Option<String>,
+    /// List of allowed models for delegation (comma-separated).
+    /// Pass empty string to clear and fall back to config file.
+    /// Example: "claude-opus-4-8,gpt-5.5"
+    #[serde(default)]
+    allowed_models: Option<String>,
 }
 
 /// Normalize: treat empty string as None (clear/fallback).
@@ -340,7 +357,7 @@ impl Tool for ConfigureDelegateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Configure the delegate model settings at runtime. Use this to set which model handles delegated tasks, change the provider, or adjust the timeout. Settings persist for the current session and override the config file. Pass empty string or 0 to clear a setting and fall back to the config file."
+        "Configure the delegate model settings at runtime. Use this to set which model handles delegated tasks, change the provider, adjust the timeout, enable/disable delegation, or restrict which models can be used. Settings persist for the current session and override the config file. Pass empty string or 0 to clear a setting and fall back to the config file."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -358,6 +375,14 @@ impl Tool for ConfigureDelegateTool {
                 "timeout_minutes": {
                     "type": "integer",
                     "description": "Timeout in minutes for delegated tasks. Pass 0 to clear and fall back to config file (default: 30)."
+                },
+                "enabled": {
+                    "type": "string",
+                    "description": "Enable or disable delegation. Pass \"true\" to enable, \"false\" to disable, or empty string to fall back to config file."
+                },
+                "allowed_models": {
+                    "type": "string",
+                    "description": "Comma-separated list of allowed models for delegation. Pass empty string to clear and fall back to config file. Example: \"claude-opus-4-8,gpt-5.5\""
                 }
             }
         })
@@ -370,58 +395,102 @@ impl Tool for ConfigureDelegateTool {
         let provider = normalize_opt_string(params.delegate_provider);
         let timeout = normalize_opt_u32(params.timeout_minutes);
 
-        // Only update if at least one field was provided
-        if model.is_none() && provider.is_none() && timeout.is_none() {
+        // Parse enabled: "true" -> Some(Some(true)), "false" -> Some(Some(false)), "" -> Some(None), None -> None
+        let enabled = match params.enabled {
+            Some(ref s) if s.trim().eq_ignore_ascii_case("true") => Some(Some(true)),
+            Some(ref s) if s.trim().eq_ignore_ascii_case("false") => Some(Some(false)),
+            Some(ref s) if s.trim().is_empty() => Some(None),
+            Some(_) => None, // invalid value, skip
+            None => None,
+        };
+
+        // Parse allowed_models: comma-separated string -> Vec<String>
+        let allowed_models_val = match params.allowed_models {
+            Some(ref s) if s.trim().is_empty() => Some(None), // clear
+            Some(ref s) => {
+                let models: Vec<String> = s
+                    .split(',')
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .collect();
+                Some(Some(models))
+            }
+            None => None,
+        };
+
+        // Check if we should show current settings (no fields provided)
+        let has_updates = model.is_some()
+            || provider.is_some()
+            || timeout.is_some()
+            || enabled.is_some()
+            || allowed_models_val.is_some();
+
+        if !has_updates {
             // Show current settings
             let file_cfg = &crate::config::config().delegate;
             let session_cfg = crate::session_delegate_config::session_delegate_config(&ctx.session_id);
             let effective_model = crate::session_delegate_config::effective_delegate_model(&ctx.session_id);
             let effective_timeout = crate::session_delegate_config::effective_delegate_timeout(&ctx.session_id);
+            let eff_enabled = effective_enabled(&ctx.session_id);
+            let eff_allowed = allowed_models(&ctx.session_id);
 
             let mut out = String::from("## Current Delegate Configuration\n\n");
+            out.push_str(&format!("**Enabled:** {}\n", if eff_enabled { "yes" } else { "no" }));
             out.push_str(&format!("**Delegate model:** {}\n", effective_model.as_deref().unwrap_or("(not set)")));
             out.push_str(&format!("**Timeout:** {} minutes\n", effective_timeout));
 
-            // Show allowed models
-            let allowed = crate::session_delegate_config::allowed_models();
-            if !allowed.is_empty() {
-                out.push_str(&format!("\n**Allowed models:** {}\n", allowed.join(", ")));
+            if !eff_allowed.is_empty() {
+                out.push_str(&format!("**Allowed models:** {}\n", eff_allowed.join(", ")));
             } else {
-                out.push_str("\n**Allowed models:** (all models — no restriction set)\n");
+                out.push_str("**Allowed models:** (all models — no restriction set)\n");
             }
             if let Some(ref session_cfg) = session_cfg {
                 out.push_str("\n**Session overrides active:**\n");
-                if session_cfg.delegate_model.is_some() {
-                    out.push_str(&format!("- model: {}\n", session_cfg.delegate_model.as_deref().unwrap()));
+                if let Some(val) = session_cfg.enabled {
+                    out.push_str(&format!("- enabled: {}\n", if val { "yes" } else { "no" }));
                 }
-                if session_cfg.delegate_provider.is_some() {
-                    out.push_str(&format!("- provider: {}\n", session_cfg.delegate_provider.as_deref().unwrap()));
+                if let Some(ref model) = session_cfg.delegate_model {
+                    out.push_str(&format!("- model: {}\n", model));
                 }
-                if session_cfg.timeout_minutes.is_some() {
-                    out.push_str(&format!("- timeout: {} min\n", session_cfg.timeout_minutes.unwrap()));
+                if let Some(ref provider) = session_cfg.delegate_provider {
+                    out.push_str(&format!("- provider: {}\n", provider));
+                }
+                if let Some(timeout) = session_cfg.timeout_minutes {
+                    out.push_str(&format!("- timeout: {} min\n", timeout));
+                }
+                if let Some(ref models) = session_cfg.allowed_models {
+                    if models.is_empty() {
+                        out.push_str("- allowed_models: [] (no models allowed)\n");
+                    } else {
+                        out.push_str(&format!("- allowed_models: [{}]\n", models.join(", ")));
+                    }
                 }
             } else {
                 out.push_str("\n**No session overrides.** Using config file values.\n");
             }
-            if file_cfg.delegate_model.is_some() {
-                out.push_str(&format!("\n**Config file:** model={}", file_cfg.delegate_model.as_deref().unwrap()));
+            out.push_str(&format!("\n**Config file:** enabled={}", file_cfg.enabled));
+            if let Some(ref model) = file_cfg.delegate_model {
+                out.push_str(&format!(", model={}", model));
             }
-            if file_cfg.delegate_provider.is_some() {
-                out.push_str(&format!(", provider={}", file_cfg.delegate_provider.as_deref().unwrap()));
+            if let Some(ref provider) = file_cfg.delegate_provider {
+                out.push_str(&format!(", provider={}", provider));
             }
             out.push_str(&format!(", timeout={}min", file_cfg.timeout_minutes));
+            if !file_cfg.allowed_models.is_empty() {
+                out.push_str(&format!(", allowed_models=[{}]", file_cfg.allowed_models.join(", ")));
+            }
             out.push('\n');
             return Ok(ToolOutput::new(out));
         }
 
         // Validate the model if one was provided
-        if let Some(Some(ref model)) = model {
-            if let Err(msg) = crate::session_delegate_config::validate_model_allowed(model) {
-                let allowed = crate::session_delegate_config::allowed_models();
+        if let Some(Some(ref model_val)) = model {
+            if let Err(msg) = validate_model_allowed(&ctx.session_id, model_val) {
+                let eff_allowed = allowed_models(&ctx.session_id);
                 return Ok(ToolOutput::new(format!(
                     "Cannot set delegate model: {}\n\nAvailable models: {}",
                     msg,
-                    if allowed.is_empty() { "(no restriction — any model)".to_string() } else { allowed.join(", ") }
+                    if eff_allowed.is_empty() { "(no restriction — any model)".to_string() } else { eff_allowed.join(", ") }
                 )));
             }
         }
@@ -431,15 +500,26 @@ impl Tool for ConfigureDelegateTool {
             model,
             provider,
             timeout,
+            enabled,
+            allowed_models_val,
         );
 
+        let eff_enabled = effective_enabled(&ctx.session_id);
         let effective_model = crate::session_delegate_config::effective_delegate_model(&ctx.session_id);
         let effective_timeout = crate::session_delegate_config::effective_delegate_timeout(&ctx.session_id);
+        let eff_allowed = allowed_models(&ctx.session_id);
 
-        Ok(ToolOutput::new(format!(
-            "Delegate configuration updated for this session.\n\n**Delegate model:** {}\n**Timeout:** {} minutes\n\nChanges persist for this session only. Use `configure_delegate` again to change them.",
-            effective_model.as_deref().unwrap_or("(not set)"),
-            effective_timeout,
-        )))
+        let mut out = String::from("Delegate configuration updated for this session.\n\n");
+        out.push_str(&format!("**Enabled:** {}\n", if eff_enabled { "yes" } else { "no" }));
+        out.push_str(&format!("**Delegate model:** {}\n", effective_model.as_deref().unwrap_or("(not set)")));
+        out.push_str(&format!("**Timeout:** {} minutes\n", effective_timeout));
+        if !eff_allowed.is_empty() {
+            out.push_str(&format!("**Allowed models:** {}\n", eff_allowed.join(", ")));
+        } else {
+            out.push_str("**Allowed models:** (all models — no restriction)\n");
+        }
+        out.push_str("\nChanges persist for this session only. Use `configure_delegate` again to change them.");
+
+        Ok(ToolOutput::new(out))
     }
 }

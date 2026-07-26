@@ -21,6 +21,14 @@ pub struct DelegateSessionConfig {
     /// Timeout override in minutes for this session.
     /// When None, falls back to the file config's timeout_minutes.
     pub timeout_minutes: Option<u32>,
+    /// Whether delegation is enabled for this session.
+    /// When None, falls back to the file config's enabled.
+    pub enabled: Option<bool>,
+    /// List of allowed models for this session.
+    /// When None, falls back to the file config's allowed_models.
+    /// When Some(empty), no models are allowed (delegation effectively disabled).
+    /// When Some(non-empty), only these models can be used for delegation.
+    pub allowed_models: Option<Vec<String>>,
 }
 
 static SESSION_DELEGATE_CONFIGS: LazyLock<RwLock<HashMap<String, DelegateSessionConfig>>> =
@@ -52,6 +60,8 @@ pub fn update_session_delegate_config(
     delegate_model: Option<Option<String>>,
     delegate_provider: Option<Option<String>>,
     timeout_minutes: Option<Option<u32>>,
+    enabled: Option<Option<bool>>,
+    allowed_models: Option<Option<Vec<String>>>,
 ) {
     let Ok(mut map) = SESSION_DELEGATE_CONFIGS.write() else {
         return;
@@ -65,6 +75,12 @@ pub fn update_session_delegate_config(
     }
     if let Some(timeout) = timeout_minutes {
         config.timeout_minutes = timeout;
+    }
+    if let Some(flag) = enabled {
+        config.enabled = flag;
+    }
+    if let Some(models) = allowed_models {
+        config.allowed_models = models;
     }
 }
 
@@ -115,16 +131,33 @@ pub fn effective_delegate_timeout(session_id: &str) -> u32 {
     crate::config::config().delegate.timeout_minutes
 }
 
-/// Get the list of allowed models for delegation (from config file).
-pub fn allowed_models() -> Vec<String> {
+/// Get the list of allowed models for delegation.
+/// Checks session config first, then file config.
+pub fn allowed_models(session_id: &str) -> Vec<String> {
+    if let Some(cfg) = session_delegate_config(session_id) {
+        if let Some(models) = cfg.allowed_models {
+            return models;
+        }
+    }
     crate::config::config().delegate.allowed_models.clone()
+}
+
+/// Check whether delegation is enabled for a session.
+/// Checks session config first, then file config.
+pub fn effective_enabled(session_id: &str) -> bool {
+    if let Some(cfg) = session_delegate_config(session_id) {
+        if let Some(flag) = cfg.enabled {
+            return flag;
+        }
+    }
+    crate::config::config().delegate.enabled
 }
 
 /// Validate that a model is in the allowed list.
 /// Returns Ok(()) if the model is allowed or the list is empty (no restriction).
 /// Also allows the configured delegate_model even if not in the list.
-pub fn validate_model_allowed(model: &str) -> Result<(), String> {
-    let allowed = allowed_models();
+pub fn validate_model_allowed(session_id: &str, model: &str) -> Result<(), String> {
+    let allowed = allowed_models(session_id);
     if allowed.is_empty() {
         return Ok(());
     }
@@ -133,6 +166,14 @@ pub fn validate_model_allowed(model: &str) -> Result<(), String> {
     if let Some(ref default_model) = cfg.delegate_model {
         if model == default_model {
             return Ok(());
+        }
+    }
+    // Also allow the session override
+    if let Some(session_cfg) = session_delegate_config(session_id) {
+        if let Some(ref session_model) = session_cfg.delegate_model {
+            if model == session_model {
+                return Ok(());
+            }
         }
     }
     if allowed.iter().any(|m| m == model) {
