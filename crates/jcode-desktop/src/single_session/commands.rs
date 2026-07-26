@@ -381,6 +381,31 @@ impl SingleSessionApp {
                 ));
                 KeyOutcome::Redraw
             }
+            "/delegate" | "/delegation" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.composer.input_undo_stack.clear();
+                match args {
+                    "" | "status" => {
+                        self.set_status(SingleSessionStatus::Info(
+                            "desktop /delegate overlay is not implemented yet · use the TUI for /delegate on|off|status".to_string(),
+                        ));
+                        KeyOutcome::Redraw
+                    }
+                    "on" | "off" => {
+                        self.set_status(SingleSessionStatus::Info(
+                            "desktop /delegate is not implemented yet · use the TUI to toggle delegation".to_string(),
+                        ));
+                        KeyOutcome::Redraw
+                    }
+                    _ => {
+                        self.set_status(SingleSessionStatus::Info(
+                            "usage: /delegate [on|off|status]".to_string(),
+                        ));
+                        KeyOutcome::Redraw
+                    }
+                }
+            }
             "/swarm" | "/bg" => {
                 self.draft.clear();
                 self.draft_cursor = 0;

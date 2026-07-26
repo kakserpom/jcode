@@ -3378,6 +3378,85 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+/// `/delegate` — show or toggle delegation for the current session.
+/// Default: disabled.
+/// Usage: `/delegate` or `/delegate status` (show status),
+///        `/delegate on` (enable), `/delegate off` (disable).
+pub(super) fn handle_delegate_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("/delegate").or_else(|| trimmed.strip_prefix("/delegation")) else {
+        return false;
+    };
+
+    // Require the command to be exactly `/delegate` followed by optional args
+    if !rest.is_empty()
+        && !rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let args = rest.trim();
+
+    let session_id = &app.session.id;
+
+    match args {
+        "" | "status" => {
+            let enabled = jcode_app_core::session_delegate_config::effective_enabled(session_id);
+            let effective_model = jcode_app_core::session_delegate_config::effective_delegate_model(session_id);
+            let timeout = jcode_app_core::session_delegate_config::effective_delegate_timeout(session_id);
+            let allowed = jcode_app_core::session_delegate_config::allowed_models(session_id);
+
+            let mut msg = format!(
+                "Delegate: {}\nTimeout: {} min\nModel: {}",
+                if enabled { "ON" } else { "OFF" },
+                timeout,
+                effective_model.as_deref().unwrap_or("(not set)"),
+            );
+            if !allowed.is_empty() {
+                msg.push_str(&format!("\nAllowed models: {}", allowed.join(", ")));
+            }
+            app.push_display_message(DisplayMessage::system(msg));
+        }
+        "on" => {
+            jcode_app_core::session_delegate_config::update_session_delegate_config(
+                session_id,
+                None,                    // model — unchanged
+                None,                    // provider — unchanged
+                None,                    // timeout — unchanged
+                Some(Some(true)),        // enabled → true
+                None,                    // allowed_models — unchanged
+            );
+            app.push_display_message(DisplayMessage::system(
+                "Delegate: ON for this session.".to_string(),
+            ));
+            app.set_status_notice("Delegate ON");
+        }
+        "off" => {
+            jcode_app_core::session_delegate_config::update_session_delegate_config(
+                session_id,
+                None,                    // model — unchanged
+                None,                    // provider — unchanged
+                None,                    // timeout — unchanged
+                Some(Some(false)),       // enabled → false
+                None,                    // allowed_models — unchanged
+            );
+            app.push_display_message(DisplayMessage::system(
+                "Delegate: OFF for this session.".to_string(),
+            ));
+            app.set_status_notice("Delegate OFF");
+        }
+        _ => {
+            app.push_display_message(DisplayMessage::error(
+                "Usage: /delegate [on|off|status]".to_string(),
+            ));
+        }
+    }
+    true
+}
+
 pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
     super::debug::handle_debug_command(app, trimmed)
 }
