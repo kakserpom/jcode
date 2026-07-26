@@ -1613,6 +1613,12 @@ pub struct DelegateConfig {
     /// Timeout in minutes for the delegated task (default: 30).
     #[serde(default = "delegate_default_timeout")]
     pub timeout_minutes: u32,
+    /// List of models the model is allowed to choose from when delegating.
+    /// When empty (default), the model can only use delegate_model or the
+    /// agent's own model. When set, the model can pick any model from this
+    /// list via the `model` parameter on the `delegate` tool.
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
 }
 
 fn delegate_default_enabled() -> bool {
@@ -1630,6 +1636,7 @@ impl Default for DelegateConfig {
             delegate_provider: None,
             enabled: true,
             timeout_minutes: 30,
+            allowed_models: Vec::new(),
         }
     }
 }

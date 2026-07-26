@@ -115,6 +115,37 @@ pub fn effective_delegate_timeout(session_id: &str) -> u32 {
     crate::config::config().delegate.timeout_minutes
 }
 
+/// Get the list of allowed models for delegation (from config file).
+pub fn allowed_models() -> Vec<String> {
+    crate::config::config().delegate.allowed_models.clone()
+}
+
+/// Validate that a model is in the allowed list.
+/// Returns Ok(()) if the model is allowed or the list is empty (no restriction).
+/// Also allows the configured delegate_model even if not in the list.
+pub fn validate_model_allowed(model: &str) -> Result<(), String> {
+    let allowed = allowed_models();
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    // Also allow the configured delegate_model
+    let cfg = &crate::config::config().delegate;
+    if let Some(ref default_model) = cfg.delegate_model {
+        if model == default_model {
+            return Ok(());
+        }
+    }
+    if allowed.iter().any(|m| m == model) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Model '{}' is not in the allowed list. Allowed models: {}",
+            model,
+            allowed.join(", ")
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

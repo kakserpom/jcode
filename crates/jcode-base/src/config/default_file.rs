@@ -637,6 +637,10 @@ enabled = true
 # delegate_provider = "claude"
 # Timeout in minutes for the delegated task (default: 30)
 timeout_minutes = 30
+# List of models the model can choose from when delegating.
+# When empty, the model can only use the delegate_model or the agent's own model.
+# When set, the model can pick any model from this list via the `model` parameter.
+# allowed_models = ["claude-opus-4-8", "gpt-5.5", "claude-sonnet-4-20250514"]
 	"#;
 
         // Substitute platform-specific defaults from the keybinding registry.

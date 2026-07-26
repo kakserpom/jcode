@@ -139,7 +139,7 @@ impl Tool for DelegateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate a difficult sub-task to a more capable model. Use this when you determine a task is too complex, requires deep reasoning, or is outside your capabilities. The delegate model will process the task independently and return its result. Returns the full response from the delegate model."
+        "Delegate a difficult sub-task to a more capable model. Use this when you determine a task is too complex, requires deep reasoning, or is outside your capabilities. The delegate model will process the task independently and return its result. Returns the full response from the delegate model. You can specify which model to delegate to via the `model` parameter. Use `configure_delegate` to see which models are available."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -156,7 +156,7 @@ impl Tool for DelegateTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional model override. Use when you need a specific model for this delegation."
+                    "description": "Optional model override. Use when you need a specific model for this delegation. See allowed models via `configure_delegate`."
                 }
             },
             "required": ["task"]
@@ -175,6 +175,16 @@ impl Tool for DelegateTool {
             .as_deref()
             .unwrap_or("default")
             .to_string();
+
+        // Validate the model is in the allowed list (if the list is non-empty)
+        if let Some(ref model) = delegate_model {
+            if let Err(msg) = crate::session_delegate_config::validate_model_allowed(model) {
+                return Ok(ToolOutput::new(format!(
+                    "Cannot delegate: {}\n\nUse `configure_delegate` to see available models or change the delegate model.",
+                    msg
+                )));
+            }
+        }
 
         let initial_message = Self::build_initial_message(&params.task, params.context.as_deref());
 
@@ -399,6 +409,14 @@ impl Tool for ConfigureDelegateTool {
             let mut out = String::from("## Current Delegate Configuration\n\n");
             out.push_str(&format!("**Delegate model:** {}\n", effective_model.as_deref().unwrap_or("(not set)")));
             out.push_str(&format!("**Timeout:** {} minutes\n", effective_timeout));
+
+            // Show allowed models
+            let allowed = crate::session_delegate_config::allowed_models();
+            if !allowed.is_empty() {
+                out.push_str(&format!("\n**Allowed models:** {}\n", allowed.join(", ")));
+            } else {
+                out.push_str("\n**Allowed models:** (all models — no restriction set)\n");
+            }
             if let Some(ref session_cfg) = session_cfg {
                 out.push_str("\n**Session overrides active:**\n");
                 if session_cfg.delegate_model.is_some() {
@@ -422,6 +440,18 @@ impl Tool for ConfigureDelegateTool {
             out.push_str(&format!(", timeout={}min", file_cfg.timeout_minutes));
             out.push('\n');
             return Ok(ToolOutput::new(out));
+        }
+
+        // Validate the model if one was provided
+        if let Some(Some(ref model)) = model {
+            if let Err(msg) = crate::session_delegate_config::validate_model_allowed(model) {
+                let allowed = crate::session_delegate_config::allowed_models();
+                return Ok(ToolOutput::new(format!(
+                    "Cannot set delegate model: {}\n\nAvailable models: {}",
+                    msg,
+                    if allowed.is_empty() { "(no restriction — any model)".to_string() } else { allowed.join(", ") }
+                )));
+            }
         }
 
         crate::session_delegate_config::update_session_delegate_config(
