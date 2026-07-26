@@ -1318,12 +1318,51 @@ async fn ensure_spawn_coordinator_swarm(
     };
 
     let Some(swarm_id) = swarm_id else {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Not in a swarm.".to_string(),
-            retry_after_secs: None,
-        });
-        return None;
+        // Session is not in a swarm. This can happen when the delegate tool
+        // (or other tools) spawn agents without going through the swarm UI.
+        // Create a simple swarm for this session instead of rejecting.
+        let new_swarm_id = req_session_id.to_string();
+        {
+            let mut members = swarm_members.write().await;
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let now = Instant::now();
+            members.insert(
+                req_session_id.to_string(),
+                SwarmMember {
+                    session_id: req_session_id.to_string(),
+                    event_tx,
+                    event_txs: HashMap::new(),
+                    working_dir: None,
+                    swarm_id: Some(new_swarm_id.clone()),
+                    swarm_enabled: true,
+                    status: "running".to_string(),
+                    detail: None,
+                    task_label: None,
+                    friendly_name: Some(req_session_id.to_string()),
+                    report_back_to_session_id: None,
+                    latest_completion_report: None,
+                    role: "coordinator".to_string(),
+                    joined_at: now,
+                    last_status_change: now,
+                    is_headless: false,
+                    output_tail: None,
+                    todo_progress: None,
+                    todo_items: Vec::new(),
+                    runtime: crate::protocol::SwarmMemberRuntime::default(),
+                },
+            );
+            swarms_by_id
+                .write()
+                .await
+                .entry(new_swarm_id.clone())
+                .or_default()
+                .insert(req_session_id.to_string());
+        }
+        {
+            let mut coordinators = swarm_coordinators.write().await;
+            coordinators.insert(new_swarm_id.clone(), req_session_id.to_string());
+        }
+        return Some(new_swarm_id);
     };
 
     // Light and ad hoc swarms are deliberately one-level fan-out: only the root
