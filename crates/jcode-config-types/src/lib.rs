@@ -1596,6 +1596,44 @@ pub struct LaunchHotkeyEntry {
     pub self_dev: bool,
 }
 
+/// Configuration for the delegate tool that lets a cheap model delegate
+/// difficult sub-tasks to a more capable model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DelegateConfig {
+    /// The model to delegate to (e.g. "claude-opus-4-8", "gpt-5.5").
+    /// When unset, delegation uses the agent's own model.
+    pub delegate_model: Option<String>,
+    /// Provider override for the delegate model (e.g. "openai", "claude").
+    #[serde(default)]
+    pub delegate_provider: Option<String>,
+    /// Whether to enable the delegate tool. Default: true.
+    #[serde(default = "delegate_default_enabled")]
+    pub enabled: bool,
+    /// Timeout in minutes for the delegated task (default: 30).
+    #[serde(default = "delegate_default_timeout")]
+    pub timeout_minutes: u32,
+}
+
+fn delegate_default_enabled() -> bool {
+    true
+}
+
+fn delegate_default_timeout() -> u32 {
+    30
+}
+
+impl Default for DelegateConfig {
+    fn default() -> Self {
+        Self {
+            delegate_model: None,
+            delegate_provider: None,
+            enabled: true,
+            timeout_minutes: 30,
+        }
+    }
+}
+
 /// Configuration for the global "launch a new jcode" hotkeys (macOS).
 ///
 /// When `entries` is empty, jcode uses its built-in defaults (`Cmd+;` -> home,

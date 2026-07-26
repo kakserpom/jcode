@@ -623,6 +623,20 @@ desktop_notifications = true
 # See https://jcode.sh/discovery-tools
 # enabled = true
 # endpoint = "https://api.jcode.sh/v1/discovery"
+
+[delegate]
+# Model delegation: lets a cheap model delegate difficult sub-tasks to a
+# more capable model, saving API costs. The cheap model decides when to
+# delegate by calling the `delegate` tool.
+# Enable the delegate tool (default: true)
+enabled = true
+# Model to delegate to (e.g. "claude-opus-4-8", "gpt-5.5").
+# When unset, delegation uses the agent's own model.
+# delegate_model = "claude-opus-4-8"
+# Provider override for the delegate model (e.g. "openai", "claude").
+# delegate_provider = "claude"
+# Timeout in minutes for the delegated task (default: 30)
+timeout_minutes = 30
 	"#;
 
         // Substitute platform-specific defaults from the keybinding registry.

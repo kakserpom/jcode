@@ -6,6 +6,7 @@ mod batch;
 mod bg;
 mod browser;
 mod communicate;
+mod delegate;
 #[cfg(target_os = "macos")]
 mod computer;
 mod conversation_search;
@@ -287,6 +288,15 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
+        // Delegate tool is on by default (opt-out); when disabled the
+        // tool is never registered.
+        if crate::config::config().delegate.enabled {
+            Self::insert_tool(
+                &mut tools_map,
+                "delegate",
+                delegate::DelegateTool::new(),
+            );
+        }
         // Sponsored discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
