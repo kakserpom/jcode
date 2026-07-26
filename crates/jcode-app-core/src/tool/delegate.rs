@@ -305,6 +305,70 @@ impl ConfigureDelegateTool {
     pub fn new() -> Self {
         Self
     }
+
+    /// Fetch and display available models from the provider catalog.
+    async fn list_provider_models(ctx: &ToolContext) -> Result<ToolOutput> {
+        let request = Request::CommListModels {
+            id: REQUEST_ID,
+            session_id: ctx.session_id.clone(),
+        };
+        match DelegateTool::send_request(request).await {
+            Ok(ServerEvent::CommListModelsResponse {
+                current_model,
+                configured_swarm_model,
+                model_routes,
+                ..
+            }) => {
+                let mut out = String::from("## Available Models\n\n");
+                if let Some(ref model) = current_model {
+                    out.push_str(&format!("**Current model:** {}\n\n", model));
+                }
+                if let Some(ref swarm_model) = configured_swarm_model {
+                    out.push_str(&format!("**Configured swarm model:** {}\n\n", swarm_model));
+                }
+                if model_routes.is_empty() {
+                    out.push_str("No model catalog available.\n");
+                } else {
+                    out.push_str("| Model | Provider | Auth | Available | Cost |\n");
+                    out.push_str("|-------|----------|------|-----------|------|\n");
+                    for route in &model_routes {
+                        let cost = match &route.cheapness {
+                            Some(c) => {
+                                if let Some(price) = c.input_price_per_mtok_micros {
+                                    let dollars = price as f64 / 1_000_000.0;
+                                    format!("${:.2}/M tok", dollars)
+                                } else {
+                                    match c.billing_kind {
+                                        _ => "paid".to_string(),
+                                    }
+                                }
+                            }
+                            None => "?".to_string(),
+                        };
+                        out.push_str(&format!(
+                            "| {} | {} | {} | {} | {} |\n",
+                            route.model,
+                            route.provider,
+                            route.api_method,
+                            if route.available { "yes" } else { "no" },
+                            cost,
+                        ));
+                    }
+                }
+                out.push_str("\nUse `delegate(model=\"...\")` to delegate to a specific model.");
+                Ok(ToolOutput::new(out))
+            }
+            Ok(response) => {
+                let msg = if let ServerEvent::Error { message, .. } = &response {
+                    message.clone()
+                } else {
+                    "Unknown response".to_string()
+                };
+                Ok(ToolOutput::new(format!("Failed to list models: {}", msg)))
+            }
+            Err(e) => Ok(ToolOutput::new(format!("Failed to list models: {}", e))),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -330,6 +394,10 @@ struct ConfigureDelegateInput {
     /// Example: "claude-opus-4-8,gpt-5.5"
     #[serde(default)]
     allowed_models: Option<String>,
+    /// When true, show available models from the provider catalog.
+    /// Ignores all other parameters.
+    #[serde(default)]
+    list_models: bool,
 }
 
 /// Normalize: treat empty string as None (clear/fallback).
@@ -383,6 +451,10 @@ impl Tool for ConfigureDelegateTool {
                 "allowed_models": {
                     "type": "string",
                     "description": "Comma-separated list of allowed models for delegation. Pass empty string to clear and fall back to config file. Example: \"claude-opus-4-8,gpt-5.5\""
+                },
+                "list_models": {
+                    "type": "boolean",
+                    "description": "When true, show available models from the provider catalog. Ignores all other parameters."
                 }
             }
         })
@@ -390,6 +462,11 @@ impl Tool for ConfigureDelegateTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ConfigureDelegateInput = serde_json::from_value(input)?;
+
+        // If list_models is true, fetch and show available models from provider
+        if params.list_models {
+            return Self::list_provider_models(&ctx).await;
+        }
 
         let model = normalize_opt_string(params.delegate_model);
         let provider = normalize_opt_string(params.delegate_provider);
