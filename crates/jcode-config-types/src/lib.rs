@@ -1607,7 +1607,7 @@ pub struct DelegateConfig {
     /// Provider override for the delegate model (e.g. "openai", "claude").
     #[serde(default)]
     pub delegate_provider: Option<String>,
-    /// Whether to enable the delegate tool. Default: true.
+    /// Whether to enable the delegate tool. Default: false (use /delegate on to enable).
     #[serde(default = "delegate_default_enabled")]
     pub enabled: bool,
     /// Timeout in minutes for the delegated task (default: 30).
@@ -1622,7 +1622,7 @@ pub struct DelegateConfig {
 }
 
 fn delegate_default_enabled() -> bool {
-    true
+    false
 }
 
 fn delegate_default_timeout() -> u32 {

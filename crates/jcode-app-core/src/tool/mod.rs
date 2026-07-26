@@ -288,20 +288,19 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
-        // Delegate tool is on by default (opt-out); when disabled the
-        // tool is never registered.
-        if crate::config::config().delegate.enabled {
-            Self::insert_tool(
-                &mut tools_map,
-                "delegate",
-                delegate::DelegateTool::new(),
-            );
-            Self::insert_tool(
-                &mut tools_map,
-                "configure_delegate",
-                delegate::ConfigureDelegateTool::new(),
-            );
-        }
+        // Delegate tool is always registered. The effective delegation
+        // state is per-session (default: disabled) and controlled via
+        // `/delegate on|off` or the `configure_delegate` tool.
+        Self::insert_tool(
+            &mut tools_map,
+            "delegate",
+            delegate::DelegateTool::new(),
+        );
+        Self::insert_tool(
+            &mut tools_map,
+            "configure_delegate",
+            delegate::ConfigureDelegateTool::new(),
+        );
         // Sponsored discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.

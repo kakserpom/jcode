@@ -628,8 +628,8 @@ desktop_notifications = true
 # Model delegation: lets a cheap model delegate difficult sub-tasks to a
 # more capable model, saving API costs. The cheap model decides when to
 # delegate by calling the `delegate` tool.
-# Enable the delegate tool (default: true)
-enabled = true
+# Enable the delegate tool (default: false — use /delegate on to enable)
+enabled = false
 # Model to delegate to (e.g. "claude-opus-4-8", "gpt-5.5").
 # When unset, delegation uses the agent's own model.
 # delegate_model = "claude-opus-4-8"
