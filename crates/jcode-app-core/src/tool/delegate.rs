@@ -1,7 +1,6 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::protocol::{
-    HistoryMessage, Request, ServerEvent, default_comm_await_target_statuses,
-    latest_assistant_comm_report,
+    Request, ServerEvent, default_comm_await_target_statuses,
 };
 use crate::session_delegate_config::{
     effective_delegate_model, effective_delegate_timeout,
@@ -106,11 +105,6 @@ impl DelegateTool {
                 _ => return Ok(serde_json::from_value(value)?),
             }
         }
-    }
-
-    /// Extract the last assistant message content from a conversation history.
-    fn extract_last_assistant_message(messages: &[HistoryMessage]) -> Option<String> {
-        latest_assistant_comm_report(messages)
     }
 
     /// Build the initial message for the spawned delegate agent.
@@ -232,60 +226,35 @@ impl Tool for DelegateTool {
             wake: false,
         };
 
-        let (completed, _members) = match Self::send_request(await_request).await {
+        let delegate_response = match Self::send_request(await_request).await {
             Ok(ServerEvent::CommAwaitMembersResponse {
-                completed,
+                completed: true,
                 members,
                 ..
-            }) => (completed, members),
-            Ok(response) => {
-                let msg = if let ServerEvent::Error { message, .. } = &response {
-                    message.clone()
-                } else {
-                    "Unknown response".to_string()
-                };
-                return Err(anyhow::anyhow!(
-                    "Delegate task failed: {}. Session: {}",
-                    msg,
-                    spawned_session_id
-                ));
+            }) => {
+                // Extract the completion report from the member status
+                let report = members
+                    .first()
+                    .and_then(|m| m.completion_report.clone())
+                    .unwrap_or_else(|| "<no response from delegate>".to_string());
+                report
             }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Delegate task timed out or failed: {}. Session: {}",
-                    e,
-                    spawned_session_id
-                ));
-            }
-        };
-
-        if !completed {
-            // Clean up the spawned session if it timed out
-            let _ = Self::send_request(Request::CommStop {
-                id: REQUEST_ID,
-                session_id: ctx.session_id.clone(),
-                target_session: spawned_session_id.clone(),
-                force: Some(true),
-            })
-            .await;
-            return Err(anyhow::anyhow!(
-                "Delegate task did not complete within {} minutes. Session: {}",
-                timeout_minutes,
-                spawned_session_id
-            ));
-        }
-
-        // Step 3: Read the delegate agent's response
-        let read_request = Request::CommReadContext {
-            id: REQUEST_ID,
-            session_id: ctx.session_id.clone(),
-            target_session: spawned_session_id.clone(),
-        };
-
-        let delegate_response = match Self::send_request(read_request).await {
-            Ok(ServerEvent::CommContextHistory { messages, .. }) => {
-                Self::extract_last_assistant_message(&messages)
-                    .unwrap_or_else(|| "<no response from delegate>".to_string())
+            Ok(ServerEvent::CommAwaitMembersResponse {
+                completed: false,
+                ..
+            }) => {
+                // Clean up the spawned session if it timed out
+                let _ = Self::send_request(Request::CommStop {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: spawned_session_id.clone(),
+                    force: Some(true),
+                })
+                .await;
+                format!(
+                    "<delegate task did not complete within {} minutes>",
+                    timeout_minutes
+                )
             }
             Ok(response) => {
                 let msg = if let ServerEvent::Error { message, .. } = &response {
@@ -293,10 +262,13 @@ impl Tool for DelegateTool {
                 } else {
                     "Unknown response".to_string()
                 };
-                format!("<delegate agent completed but response unavailable: {}>", msg)
+                format!("<delegate task failed: {}. Session: {}>", msg, spawned_session_id)
             }
             Err(e) => {
-                format!("<delegate agent completed but response unavailable: {}>", e)
+                format!(
+                    "<delegate task failed: {}. Session: {}>",
+                    e, spawned_session_id
+                )
             }
         };
 
