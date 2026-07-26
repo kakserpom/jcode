@@ -296,6 +296,11 @@ impl Registry {
                 "delegate",
                 delegate::DelegateTool::new(),
             );
+            Self::insert_tool(
+                &mut tools_map,
+                "configure_delegate",
+                delegate::ConfigureDelegateTool::new(),
+            );
         }
         // Sponsored discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever

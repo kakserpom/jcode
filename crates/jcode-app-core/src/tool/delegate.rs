@@ -3,6 +3,9 @@ use crate::protocol::{
     HistoryMessage, Request, ServerEvent, default_comm_await_target_statuses,
     latest_assistant_comm_report,
 };
+use crate::session_delegate_config::{
+    effective_delegate_model, effective_delegate_timeout,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -163,11 +166,10 @@ impl Tool for DelegateTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: DelegateInput = serde_json::from_value(input)?;
 
-        // Determine the delegate model
-        let delegate_cfg = &crate::config::config().delegate;
+        // Determine the delegate model: explicit param > session config > file config
         let delegate_model = params
             .model
-            .or_else(|| delegate_cfg.delegate_model.clone());
+            .or_else(|| effective_delegate_model(&ctx.session_id));
 
         let delegate_model_str = delegate_model
             .as_deref()
@@ -204,7 +206,7 @@ impl Tool for DelegateTool {
         };
 
         // Step 2: Wait for the spawned agent to complete
-        let timeout_minutes = delegate_cfg.timeout_minutes;
+        let timeout_minutes = effective_delegate_timeout(&ctx.session_id);
         let timeout_secs = timeout_minutes as u64 * 60;
         let _socket_timeout = Duration::from_secs(timeout_secs + 30);
 
@@ -300,6 +302,142 @@ impl Tool for DelegateTool {
         Ok(ToolOutput::new(format!(
             "## Delegation Result\n\n**Delegate model:** {}\n\n**Task:** {}\n\n**Response:**\n\n{}",
             delegate_model_str, params.task, delegate_response
+        )))
+    }
+}
+
+/// Tool to configure the delegate settings at runtime.
+/// Allows the model to set/change the delegate model, provider, or timeout
+/// without editing the config file.
+pub struct ConfigureDelegateTool;
+
+impl ConfigureDelegateTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[derive(Clone, Deserialize)]
+struct ConfigureDelegateInput {
+    /// Model to use for delegation (e.g. "claude-opus-4-8", "gpt-5.5").
+    /// Pass empty string to clear and fall back to config file value.
+    #[serde(default)]
+    delegate_model: Option<String>,
+    /// Provider to use for the delegate model (e.g. "openai", "claude").
+    /// Pass empty string to clear.
+    #[serde(default)]
+    delegate_provider: Option<String>,
+    /// Timeout in minutes for delegated tasks.
+    /// Pass 0 to clear and fall back to config file value.
+    #[serde(default)]
+    timeout_minutes: Option<u32>,
+}
+
+/// Normalize: treat empty string as None (clear/fallback).
+fn normalize_opt_string(v: Option<String>) -> Option<Option<String>> {
+    match v {
+        Some(s) if s.trim().is_empty() => Some(None),
+        Some(s) => Some(Some(s.trim().to_string())),
+        None => None,
+    }
+}
+
+/// Normalize: treat 0 as None (clear/fallback).
+fn normalize_opt_u32(v: Option<u32>) -> Option<Option<u32>> {
+    match v {
+        Some(0) => Some(None),
+        Some(n) => Some(Some(n)),
+        None => None,
+    }
+}
+
+#[async_trait]
+impl Tool for ConfigureDelegateTool {
+    fn name(&self) -> &'static str {
+        "configure_delegate"
+    }
+
+    fn description(&self) -> &'static str {
+        "Configure the delegate model settings at runtime. Use this to set which model handles delegated tasks, change the provider, or adjust the timeout. Settings persist for the current session and override the config file. Pass empty string or 0 to clear a setting and fall back to the config file."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "delegate_model": {
+                    "type": "string",
+                    "description": "Model to use for delegation (e.g. \"claude-opus-4-8\", \"gpt-5.5\"). Pass empty string to clear and fall back to config file."
+                },
+                "delegate_provider": {
+                    "type": "string",
+                    "description": "Provider for the delegate model (e.g. \"openai\", \"claude\"). Pass empty string to clear."
+                },
+                "timeout_minutes": {
+                    "type": "integer",
+                    "description": "Timeout in minutes for delegated tasks. Pass 0 to clear and fall back to config file (default: 30)."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let params: ConfigureDelegateInput = serde_json::from_value(input)?;
+
+        let model = normalize_opt_string(params.delegate_model);
+        let provider = normalize_opt_string(params.delegate_provider);
+        let timeout = normalize_opt_u32(params.timeout_minutes);
+
+        // Only update if at least one field was provided
+        if model.is_none() && provider.is_none() && timeout.is_none() {
+            // Show current settings
+            let file_cfg = &crate::config::config().delegate;
+            let session_cfg = crate::session_delegate_config::session_delegate_config(&ctx.session_id);
+            let effective_model = crate::session_delegate_config::effective_delegate_model(&ctx.session_id);
+            let effective_timeout = crate::session_delegate_config::effective_delegate_timeout(&ctx.session_id);
+
+            let mut out = String::from("## Current Delegate Configuration\n\n");
+            out.push_str(&format!("**Delegate model:** {}\n", effective_model.as_deref().unwrap_or("(not set)")));
+            out.push_str(&format!("**Timeout:** {} minutes\n", effective_timeout));
+            if let Some(ref session_cfg) = session_cfg {
+                out.push_str("\n**Session overrides active:**\n");
+                if session_cfg.delegate_model.is_some() {
+                    out.push_str(&format!("- model: {}\n", session_cfg.delegate_model.as_deref().unwrap()));
+                }
+                if session_cfg.delegate_provider.is_some() {
+                    out.push_str(&format!("- provider: {}\n", session_cfg.delegate_provider.as_deref().unwrap()));
+                }
+                if session_cfg.timeout_minutes.is_some() {
+                    out.push_str(&format!("- timeout: {} min\n", session_cfg.timeout_minutes.unwrap()));
+                }
+            } else {
+                out.push_str("\n**No session overrides.** Using config file values.\n");
+            }
+            if file_cfg.delegate_model.is_some() {
+                out.push_str(&format!("\n**Config file:** model={}", file_cfg.delegate_model.as_deref().unwrap()));
+            }
+            if file_cfg.delegate_provider.is_some() {
+                out.push_str(&format!(", provider={}", file_cfg.delegate_provider.as_deref().unwrap()));
+            }
+            out.push_str(&format!(", timeout={}min", file_cfg.timeout_minutes));
+            out.push('\n');
+            return Ok(ToolOutput::new(out));
+        }
+
+        crate::session_delegate_config::update_session_delegate_config(
+            &ctx.session_id,
+            model,
+            provider,
+            timeout,
+        );
+
+        let effective_model = crate::session_delegate_config::effective_delegate_model(&ctx.session_id);
+        let effective_timeout = crate::session_delegate_config::effective_delegate_timeout(&ctx.session_id);
+
+        Ok(ToolOutput::new(format!(
+            "Delegate configuration updated for this session.\n\n**Delegate model:** {}\n**Timeout:** {} minutes\n\nChanges persist for this session only. Use `configure_delegate` again to change them.",
+            effective_model.as_deref().unwrap_or("(not set)"),
+            effective_timeout,
         )))
     }
 }

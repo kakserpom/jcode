@@ -41,6 +41,7 @@ pub mod replay;
 pub mod restart_snapshot;
 pub mod server;
 pub mod server_spawn;
+pub mod session_delegate_config;
 pub mod session_effort;
 pub mod session_launch;
 pub mod session_rebuild;
