@@ -3459,9 +3459,15 @@ pub(super) fn handle_delegate_command(app: &mut App, trimmed: &str) -> bool {
 
 /// `/mangle` — show or toggle text mangling for the current session.
 /// When enabled, sensitive words are replaced before sending to the LLM
-/// provider and restored in the response. Default: disabled.
-/// Usage: `/mangle` or `/mangle status` (show status),
-///        `/mangle on` (enable), `/mangle off` (disable).
+/// provider and restored in the response. All mappings are session-scoped
+/// and do not affect the config file.
+/// Usage:
+///   `/mangle` or `/mangle status` — show status and mappings
+///   `/mangle on` — enable mangling
+///   `/mangle off` — disable mangling
+///   `/mangle add <sensitive> <replacement>` — add a mapping
+///   `/mangle remove <sensitive>` — remove a mapping
+///   `/mangle clear` — remove all session mappings
 pub(super) fn handle_mangle_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/mangle") else {
         return false;
@@ -3482,7 +3488,7 @@ pub(super) fn handle_mangle_command(app: &mut App, trimmed: &str) -> bool {
     let session_id = &app.session.id;
 
     match args {
-        "" | "status" => {
+        "" | "status" | "list" => {
             let enabled = jcode_app_core::mangle::effective_mangle_enabled(session_id);
             let mappings = jcode_app_core::mangle::effective_mangle_mappings(session_id);
 
@@ -3525,9 +3531,65 @@ pub(super) fn handle_mangle_command(app: &mut App, trimmed: &str) -> bool {
             ));
             app.set_status_notice("Mangle OFF");
         }
+        "clear" => {
+            jcode_app_core::mangle::clear_session_mappings(session_id);
+            app.push_display_message(DisplayMessage::system(
+                "All session mangle mappings cleared.".to_string(),
+            ));
+            app.set_status_notice("Mappings cleared");
+        }
+        _ if args.starts_with("add ") => {
+            let rest = args.strip_prefix("add ").unwrap_or("").trim();
+            if let Some((sensitive, replacement)) = rest.split_once(char::is_whitespace) {
+                let sensitive = sensitive.trim();
+                let replacement = replacement.trim();
+                if !sensitive.is_empty() && !replacement.is_empty() {
+                    jcode_app_core::mangle::add_session_mapping(
+                        session_id,
+                        sensitive,
+                        replacement,
+                    );
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Added mapping: \"{}\" → \"{}\"",
+                        sensitive, replacement
+                    )));
+                    app.set_status_notice("Mapping added");
+                } else {
+                    app.push_display_message(DisplayMessage::error(
+                        "Usage: /mangle add <sensitive> <replacement>".to_string(),
+                    ));
+                }
+            } else {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /mangle add <sensitive> <replacement>".to_string(),
+                ));
+            }
+        }
+        _ if args.starts_with("remove ") || args.starts_with("rm ") => {
+            let prefix = if args.starts_with("remove ") { "remove " } else { "rm " };
+            let sensitive = args.strip_prefix(prefix).unwrap_or("").trim();
+            if !sensitive.is_empty() {
+                if jcode_app_core::mangle::remove_session_mapping(session_id, sensitive) {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Removed mapping: \"{}\"",
+                        sensitive
+                    )));
+                    app.set_status_notice("Mapping removed");
+                } else {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Mapping not found: \"{}\"",
+                        sensitive
+                    )));
+                }
+            } else {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /mangle remove <sensitive>".to_string(),
+                ));
+            }
+        }
         _ => {
             app.push_display_message(DisplayMessage::error(
-                "Usage: /mangle [on|off|status]".to_string(),
+                "Usage: /mangle [on|off|status|add|remove|clear]".to_string(),
             ));
         }
     }

@@ -65,6 +65,55 @@ pub fn update_session_mangle_config(
     }
 }
 
+/// Add a mapping to the session-level config.
+/// If the sensitive word already exists, its replacement is updated.
+pub fn add_session_mapping(session_id: &str, sensitive: &str, replacement: &str) {
+    if sensitive.is_empty() {
+        return;
+    }
+    let Ok(mut map) = SESSION_MANGLE_CONFIGS.write() else {
+        return;
+    };
+    let config = map.entry(session_id.to_string()).or_default();
+    let mut mappings = config.mappings.clone().unwrap_or_default();
+    // Remove existing entry with same sensitive word, then add
+    mappings.retain(|m| m.sensitive != sensitive);
+    mappings.push(crate::config::MangleMapping {
+        sensitive: sensitive.to_string(),
+        replacement: replacement.to_string(),
+    });
+    config.mappings = Some(mappings);
+}
+
+/// Remove a mapping from the session-level config by sensitive word.
+/// Returns true if the mapping was found and removed.
+pub fn remove_session_mapping(session_id: &str, sensitive: &str) -> bool {
+    if sensitive.is_empty() {
+        return false;
+    }
+    let Ok(mut map) = SESSION_MANGLE_CONFIGS.write() else {
+        return false;
+    };
+    let config = map.entry(session_id.to_string()).or_default();
+    let mut mappings = config.mappings.clone().unwrap_or_default();
+    let before = mappings.len();
+    mappings.retain(|m| m.sensitive != sensitive);
+    if mappings.len() == before {
+        return false;
+    }
+    config.mappings = Some(mappings);
+    true
+}
+
+/// Clear all session-level mappings.
+pub fn clear_session_mappings(session_id: &str) {
+    let Ok(mut map) = SESSION_MANGLE_CONFIGS.write() else {
+        return;
+    };
+    let config = map.entry(session_id.to_string()).or_default();
+    config.mappings = Some(Vec::new());
+}
+
 /// Look up a session's mangling configuration override, if any.
 fn session_mangle_config(session_id: &str) -> Option<MangleSessionConfig> {
     SESSION_MANGLE_CONFIGS
