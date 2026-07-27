@@ -648,12 +648,14 @@ timeout_minutes = 30
 # the provider while keeping conversation context intact.
 # Enable mangling (default: false — use /mangle on to enable)
 enabled = false
-# Define word mappings: sensitive word -> replacement text.
-# The replacement is sent to the provider instead of the sensitive word.
-# Example:
-#   [[mangle.mappings]]
-#   sensitive = "ProjectX"
-#   replacement = "the project"
+# Define word mappings in a separate file: ~/.jcode/mangle_mappings.toml
+# This file is not readable by the model via the read tool.
+# Format: JSON array of objects with "sensitive" and "replacement" fields.
+# Example mangle_mappings.toml:
+#   [
+#     {"sensitive": "ProjectX", "replacement": "the project"},
+#     {"sensitive": "user@example.com", "replacement": "[email]"}
+#   ]
 	"#;
 
         // Substitute platform-specific defaults from the keybinding registry.

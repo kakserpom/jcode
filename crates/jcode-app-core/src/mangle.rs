@@ -8,6 +8,31 @@
 use std::sync::LazyLock;
 use std::sync::RwLock;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// Get the path to the mangle mappings file.
+fn mangle_mappings_path() -> Option<PathBuf> {
+    crate::storage::jcode_dir().ok().map(|d| d.join("mangle_mappings.toml"))
+}
+
+/// Load mappings from the separate mangle mappings file.
+/// Returns empty vec if the file doesn't exist or can't be read.
+/// File format: JSON array of {sensitive, replacement} objects.
+fn load_mappings_from_file() -> Vec<crate::config::MangleMapping> {
+    let path = match mangle_mappings_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    if !path.exists() {
+        return Vec::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            serde_json::from_str(&content).unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
+    }
+}
 
 /// Per-session mangling configuration override.
 #[derive(Debug, Clone, Default)]
@@ -68,14 +93,22 @@ pub fn effective_mangle_enabled(session_id: &str) -> bool {
 }
 
 /// Get the effective mangling mappings for a session.
-/// Falls back to file config if no session override.
+/// Checks session config first, then file config, then the separate
+/// mangle_mappings.toml file.
 pub fn effective_mangle_mappings(session_id: &str) -> Vec<crate::config::MangleMapping> {
     if let Some(cfg) = session_mangle_config(session_id) {
         if let Some(mappings) = cfg.mappings {
             return mappings;
         }
     }
-    crate::config::config().mangle.mappings.clone()
+    // First check file config's mappings (legacy support)
+    let file_mappings = crate::config::config().mangle.mappings.clone();
+    if !file_mappings.is_empty() {
+        return file_mappings;
+    }
+    // Fall back to the separate mangle_mappings.toml file
+    // (cached per call; the file is small and read infrequently)
+    load_mappings_from_file()
 }
 
 /// Mangle text: replace all sensitive words with their replacements.

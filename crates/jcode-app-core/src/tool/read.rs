@@ -154,6 +154,17 @@ impl Tool for ReadTool {
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
 
+        // Block access to the mangle mappings file to prevent the model
+        // from reading sensitive word mappings.
+        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            if filename == "mangle_mappings.toml" {
+                return Err(anyhow::anyhow!(
+                    "Access denied: {} is a restricted file.",
+                    params.file_path
+                ));
+            }
+        }
+
         // Check if file exists
         if !path.exists() {
             // Try to find similar files
