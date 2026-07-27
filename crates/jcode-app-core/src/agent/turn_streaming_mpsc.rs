@@ -198,6 +198,14 @@ impl Agent {
             ));
             let api_start = Instant::now();
 
+            // Mangle messages before sending to the provider
+            let session_id = self.session.id.clone();
+            if crate::mangle::effective_mangle_enabled(&session_id) {
+                for msg in &mut messages_with_memory {
+                    crate::mangle::mangle_message(msg, &session_id);
+                }
+            }
+
             let stamped = crate::config::config()
                 .features
                 .message_timestamps
@@ -511,6 +519,12 @@ impl Agent {
                                 duration_secs: None,
                             });
                         }
+                        // Demangle response text: restore original sensitive words
+                        let text = if crate::mangle::effective_mangle_enabled(&session_id) {
+                            crate::mangle::demangle_text(&text, &session_id)
+                        } else {
+                            text
+                        };
                         text_content.push_str(&text);
                         if inline_output_tap {
                             self.inline_tail.set_live(&text_content);

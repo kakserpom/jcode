@@ -3457,6 +3457,83 @@ pub(super) fn handle_delegate_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+/// `/mangle` — show or toggle text mangling for the current session.
+/// When enabled, sensitive words are replaced before sending to the LLM
+/// provider and restored in the response. Default: disabled.
+/// Usage: `/mangle` or `/mangle status` (show status),
+///        `/mangle on` (enable), `/mangle off` (disable).
+pub(super) fn handle_mangle_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("/mangle") else {
+        return false;
+    };
+
+    // Require the command to be exactly `/mangle` followed by optional args
+    if !rest.is_empty()
+        && !rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let args = rest.trim();
+    let session_id = &app.session.id;
+
+    match args {
+        "" | "status" => {
+            let enabled = jcode_app_core::mangle::effective_mangle_enabled(session_id);
+            let mappings = jcode_app_core::mangle::effective_mangle_mappings(session_id);
+
+            let mut msg = format!(
+                "Mangle: {}\nMappings: {}",
+                if enabled { "ON" } else { "OFF" },
+                mappings.len(),
+            );
+            if !mappings.is_empty() {
+                for (i, m) in mappings.iter().enumerate() {
+                    msg.push_str(&format!(
+                        "\n  {}: \"{}\" → \"{}\"",
+                        i + 1,
+                        m.sensitive,
+                        m.replacement
+                    ));
+                }
+            }
+            app.push_display_message(DisplayMessage::system(msg));
+        }
+        "on" => {
+            jcode_app_core::mangle::update_session_mangle_config(
+                session_id,
+                Some(Some(true)),  // enabled → true
+                None,              // mappings — unchanged
+            );
+            app.push_display_message(DisplayMessage::system(
+                "Mangle: ON for this session. Sensitive words will be replaced before sending to the provider.".to_string(),
+            ));
+            app.set_status_notice("Mangle ON");
+        }
+        "off" => {
+            jcode_app_core::mangle::update_session_mangle_config(
+                session_id,
+                Some(Some(false)), // enabled → false
+                None,              // mappings — unchanged
+            );
+            app.push_display_message(DisplayMessage::system(
+                "Mangle: OFF for this session.".to_string(),
+            ));
+            app.set_status_notice("Mangle OFF");
+        }
+        _ => {
+            app.push_display_message(DisplayMessage::error(
+                "Usage: /mangle [on|off|status]".to_string(),
+            ));
+        }
+    }
+    true
+}
+
 pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
     super::debug::handle_debug_command(app, trimmed)
 }

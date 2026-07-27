@@ -641,6 +641,19 @@ timeout_minutes = 30
 # When empty, the model can only use the delegate_model or the agent's own model.
 # When set, the model can pick any model from this list via the `model` parameter.
 # allowed_models = ["claude-opus-4-8", "gpt-5.5", "claude-sonnet-4-20250514"]
+
+[mangle]
+# Text mangling: replace sensitive words before sending to the LLM provider
+# and restore them when receiving responses. This hides sensitive data from
+# the provider while keeping conversation context intact.
+# Enable mangling (default: false — use /mangle on to enable)
+enabled = false
+# Define word mappings: sensitive word -> replacement text.
+# The replacement is sent to the provider instead of the sensitive word.
+# Example:
+#   [[mangle.mappings]]
+#   sensitive = "ProjectX"
+#   replacement = "the project"
 	"#;
 
         // Substitute platform-specific defaults from the keybinding registry.

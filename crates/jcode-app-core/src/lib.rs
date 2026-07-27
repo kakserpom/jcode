@@ -46,6 +46,7 @@ pub mod session_effort;
 pub mod session_launch;
 pub mod session_rebuild;
 pub mod setup_hints;
+pub mod mangle;
 pub mod ssh_remote;
 pub mod startup_profile;
 pub mod tool;

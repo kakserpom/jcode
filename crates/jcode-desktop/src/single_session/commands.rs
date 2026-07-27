@@ -406,6 +406,31 @@ impl SingleSessionApp {
                     }
                 }
             }
+            "/mangle" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.composer.input_undo_stack.clear();
+                match args {
+                    "" | "status" => {
+                        self.set_status(SingleSessionStatus::Info(
+                            "desktop /mangle is not implemented yet · use the TUI for /mangle on|off|status".to_string(),
+                        ));
+                        KeyOutcome::Redraw
+                    }
+                    "on" | "off" => {
+                        self.set_status(SingleSessionStatus::Info(
+                            "desktop /mangle is not implemented yet · use the TUI to toggle mangling".to_string(),
+                        ));
+                        KeyOutcome::Redraw
+                    }
+                    _ => {
+                        self.set_status(SingleSessionStatus::Info(
+                            "usage: /mangle [on|off|status]".to_string(),
+                        ));
+                        KeyOutcome::Redraw
+                    }
+                }
+            }
             "/swarm" | "/bg" => {
                 self.draft.clear();
                 self.draft_cursor = 0;

@@ -1641,6 +1641,49 @@ impl Default for DelegateConfig {
     }
 }
 
+/// A single sensitive word mapping for mangling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MangleMapping {
+    /// The sensitive word/phrase to replace before sending to the provider.
+    pub sensitive: String,
+    /// The replacement text sent to the provider instead.
+    pub replacement: String,
+}
+
+impl Default for MangleMapping {
+    fn default() -> Self {
+        Self {
+            sensitive: String::new(),
+            replacement: String::new(),
+        }
+    }
+}
+
+/// Configuration for text mangling: replaces sensitive words before sending
+/// to the LLM provider and restores them when receiving responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MangleConfig {
+    /// Whether mangling is enabled. Default: false (use /mangle on to enable).
+    pub enabled: bool,
+    /// List of sensitive word mappings (sensitive → replacement).
+    pub mappings: Vec<MangleMapping>,
+}
+
+fn mangle_default_enabled() -> bool {
+    false
+}
+
+impl Default for MangleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mappings: Vec::new(),
+        }
+    }
+}
+
 /// Configuration for the global "launch a new jcode" hotkeys (macOS).
 ///
 /// When `entries` is empty, jcode uses its built-in defaults (`Cmd+;` -> home,
