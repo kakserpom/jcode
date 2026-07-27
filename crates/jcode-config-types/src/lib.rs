@@ -1671,10 +1671,6 @@ pub struct MangleConfig {
     pub mappings: Vec<MangleMapping>,
 }
 
-fn mangle_default_enabled() -> bool {
-    false
-}
-
 impl Default for MangleConfig {
     fn default() -> Self {
         Self {
