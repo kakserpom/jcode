@@ -3457,6 +3457,59 @@ pub(super) fn handle_delegate_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+/// Parse arguments supporting both quoted and unquoted strings.
+/// Handles "double quotes", 'single quotes', and bare words.
+/// Returns the parsed arguments in order.
+fn parse_quoted_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' | '\'' => {
+                if let Some(quote) = in_quote {
+                    if ch == quote {
+                        // Closing quote - end the argument
+                        if !current.is_empty() {
+                            args.push(current.clone());
+                            current.clear();
+                        }
+                        in_quote = None;
+                    } else {
+                        // Different quote inside a quoted string - keep as literal
+                        current.push(ch);
+                    }
+                } else {
+                    // Opening quote
+                    if !current.is_empty() {
+                        // Unquoted text before quote - push it as separate arg
+                        args.push(current.clone());
+                        current.clear();
+                    }
+                    in_quote = Some(ch);
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_quote.is_some() {
+                    current.push(c);
+                } else if !current.is_empty() {
+                    args.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
 /// `/mangle` — show or toggle text mangling for the current session.
 /// When enabled, sensitive words are replaced before sending to the LLM
 /// provider and restored in the response. All mappings are session-scoped
@@ -3540,14 +3593,15 @@ pub(super) fn handle_mangle_command(app: &mut App, trimmed: &str) -> bool {
         }
         _ if args.starts_with("add ") => {
             let rest = args.strip_prefix("add ").unwrap_or("").trim();
-            if let Some((sensitive, replacement)) = rest.split_once(char::is_whitespace) {
-                let sensitive = sensitive.trim();
-                let replacement = replacement.trim();
+            let parsed = parse_quoted_args(rest);
+            if parsed.len() >= 2 {
+                let sensitive = parsed[0].trim().to_string();
+                let replacement = parsed[1..].join(" ").trim().to_string();
                 if !sensitive.is_empty() && !replacement.is_empty() {
                     jcode_app_core::mangle::add_session_mapping(
                         session_id,
-                        sensitive,
-                        replacement,
+                        &sensitive,
+                        &replacement,
                     );
                     app.push_display_message(DisplayMessage::system(format!(
                         "Added mapping: \"{}\" → \"{}\"",
@@ -3567,7 +3621,9 @@ pub(super) fn handle_mangle_command(app: &mut App, trimmed: &str) -> bool {
         }
         _ if args.starts_with("remove ") || args.starts_with("rm ") => {
             let prefix = if args.starts_with("remove ") { "remove " } else { "rm " };
-            let sensitive = args.strip_prefix(prefix).unwrap_or("").trim();
+            let rest = args.strip_prefix(prefix).unwrap_or("").trim();
+            let parsed = parse_quoted_args(rest);
+            let sensitive = parsed.first().map(|s| s.trim()).unwrap_or("");
             if !sensitive.is_empty() {
                 if jcode_app_core::mangle::remove_session_mapping(session_id, sensitive) {
                     app.push_display_message(DisplayMessage::system(format!(
