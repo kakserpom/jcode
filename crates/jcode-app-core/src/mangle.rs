@@ -156,3 +156,125 @@ pub fn mangle_message(msg: &mut crate::message::Message, session_id: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_test_mappings() {
+        let mappings = vec![
+            crate::config::MangleMapping {
+                sensitive: "ProjectX".to_string(),
+                replacement: "the project".to_string(),
+            },
+            crate::config::MangleMapping {
+                sensitive: "secret_api_key_42".to_string(),
+                replacement: "[REDACTED]".to_string(),
+            },
+        ];
+        update_session_mangle_config(
+            "test_session",
+            Some(Some(true)),
+            Some(Some(mappings)),
+        );
+    }
+
+    #[test]
+    fn test_mangle_text_basic() {
+        setup_test_mappings();
+        let result = mangle_text("ProjectX is a secret project", "test_session");
+        assert_eq!(result, "the project is a secret project");
+    }
+
+    #[test]
+    fn test_demangle_text_basic() {
+        setup_test_mappings();
+        let result = demangle_text("the project is a secret project", "test_session");
+        assert_eq!(result, "ProjectX is a secret project");
+    }
+
+    #[test]
+    fn test_mangle_disabled() {
+        let result = mangle_text("ProjectX is secret", "no_config_session");
+        assert_eq!(result, "ProjectX is secret");
+    }
+
+    #[test]
+    fn test_mangle_multiple_mappings() {
+        setup_test_mappings();
+        let result = mangle_text(
+            "ProjectX uses secret_api_key_42 for auth",
+            "test_session",
+        );
+        assert_eq!(result, "the project uses [REDACTED] for auth");
+    }
+
+    #[test]
+    fn test_demangle_multiple_mappings() {
+        setup_test_mappings();
+        let result = demangle_text(
+            "the project uses [REDACTED] for auth",
+            "test_session",
+        );
+        assert_eq!(result, "ProjectX uses secret_api_key_42 for auth");
+    }
+
+    #[test]
+    fn test_mangle_roundtrip() {
+        setup_test_mappings();
+        let original = "My project is ProjectX and the key is secret_api_key_42";
+        let mangled = mangle_text(original, "test_session");
+        let demangled = demangle_text(&mangled, "test_session");
+        assert_eq!(demangled.as_str(), original);
+    }
+
+    #[test]
+    fn test_mangle_no_sensitive_text() {
+        setup_test_mappings();
+        let result = mangle_text("Hello world, nothing sensitive here", "test_session");
+        assert_eq!(result, "Hello world, nothing sensitive here");
+    }
+
+    #[test]
+    fn test_mangle_empty_mappings() {
+        update_session_mangle_config("empty_session", Some(Some(true)), Some(Some(vec![])));
+        let result = mangle_text("ProjectX is sensitive", "empty_session");
+        assert_eq!(result, "ProjectX is sensitive");
+    }
+
+    #[test]
+    fn test_mangle_message_text_block() {
+        setup_test_mappings();
+        let mut msg = crate::message::Message::user("ProjectX is sensitive");
+        mangle_message(&mut msg, "test_session");
+        let text = msg.content.first().unwrap();
+        match text {
+            crate::message::ContentBlock::Text { text, .. } => {
+                assert_eq!(text, "the project is sensitive");
+            }
+            _ => panic!("Expected Text block"),
+        }
+    }
+
+    #[test]
+    fn test_mangle_message_tool_result() {
+        setup_test_mappings();
+        let mut msg = crate::message::Message {
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "The result contains secret_api_key_42".to_string(),
+                is_error: None,
+            }],
+            timestamp: Some(chrono::Utc::now()),
+            tool_duration_ms: None,
+        };
+        mangle_message(&mut msg, "test_session");
+        match &msg.content[0] {
+            crate::message::ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(content, "The result contains [REDACTED]");
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
+    }
+}

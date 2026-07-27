@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 /// Runtime delegate configuration for a single session.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DelegateSessionConfig {
     /// Model override for this session (e.g. "claude-opus-4-8").
     /// When None, falls back to the file config's delegate_model.
@@ -201,6 +201,8 @@ mod tests {
             delegate_model: Some("claude-opus-4-8".to_string()),
             delegate_provider: None,
             timeout_minutes: Some(60),
+            enabled: None,
+            allowed_models: None,
         };
         record_session_delegate_config(sid, Some(cfg.clone()));
         assert_eq!(session_delegate_config(sid).as_ref(), Some(&cfg));
@@ -210,6 +212,8 @@ mod tests {
             delegate_model: Some("gpt-5.5".to_string()),
             delegate_provider: Some("openai".to_string()),
             timeout_minutes: None,
+            enabled: Some(true),
+            allowed_models: Some(vec!["gpt-5.5".to_string()]),
         };
         record_session_delegate_config(sid, Some(cfg2.clone()));
         assert_eq!(session_delegate_config(sid).as_ref(), Some(&cfg2));
@@ -230,6 +234,8 @@ mod tests {
             Some(Some("claude-opus-4-8".to_string())),
             None,
             None,
+            None,
+            None,
         );
         let cfg = session_delegate_config(sid).unwrap();
         assert_eq!(cfg.delegate_model.as_deref(), Some("claude-opus-4-8"));
@@ -237,7 +243,7 @@ mod tests {
         assert_eq!(cfg.timeout_minutes, None);
 
         // Update just the timeout, model stays.
-        update_session_delegate_config(sid, None, None, Some(Some(45)));
+        update_session_delegate_config(sid, None, None, Some(Some(45)), None, None);
         let cfg = session_delegate_config(sid).unwrap();
         assert_eq!(cfg.delegate_model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(cfg.timeout_minutes, Some(45));
