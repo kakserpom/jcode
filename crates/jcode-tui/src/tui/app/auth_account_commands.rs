@@ -6,62 +6,57 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    // /auth project <name> <api-key> [--base-url <url>] [--type <type>]
-    // Creates a project-level provider in .jcode/config.toml
-    if let Some(rest) = trimmed.strip_prefix("/auth project ") {
-        let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-        if parts.len() < 2 {
-            app.push_display_message(DisplayMessage::error(
-                "Usage: /auth project <name> <api-key> [--base-url <url>] [--type <type>]\n\
-                 Creates a project-level provider in .jcode/config.toml\n\
-                 Examples:\n\
-                   /auth project my-openrouter sk-or-v1-xxxxx\n\
-                   /auth project my-groq gsk-xxxx --base-url https://api.groq.com/openai/v1\n\
-                   /auth project my-deepseek sk-xxxx --base-url https://api.deepseek.com/v1"
-                    .to_string(),
-            ));
-            return true;
-        }
-        let name = parts[0].trim().to_string();
-        let rest = parts[1].trim();
-
-        // Parse optional --base-url and --type flags
-        let mut api_key = String::new();
-        let mut base_url = None;
-        let mut provider_type = None;
-        let mut i = 0;
-        let tokens: Vec<&str> = rest.split_whitespace().collect();
-        while i < tokens.len() {
-            match tokens[i] {
-                "--base-url" | "--base_url" | "--baseurl" => {
-                    i += 1;
-                    if i < tokens.len() {
-                        base_url = Some(tokens[i].to_string());
-                    }
-                }
-                "--type" => {
-                    i += 1;
-                    if i < tokens.len() {
-                        provider_type = Some(tokens[i].to_string());
-                    }
-                }
-                _ => {
-                    if api_key.is_empty() {
-                        api_key = tokens[i].to_string();
-                    }
-                }
+    // /auth project [on|off|status] — toggle project-scoped credentials
+    // When on, API keys saved via /login are stored per-project
+    // and automatically selected when working in this project.
+    if let Some(rest) = trimmed.strip_prefix("/auth project") {
+        let args = rest.trim();
+        let session_id = &app.session.id;
+        match args {
+            "" | "status" => {
+                let enabled = crate::session_config::get_project_auth_enabled(session_id);
+                let wd = app.session.working_dir.as_deref().unwrap_or("(none)");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Project auth: {}\nWorking dir: {}\n\
+                     When ON, /login will save credentials per-project.",
+                    if enabled { "ON" } else { "OFF" },
+                    wd
+                )));
             }
-            i += 1;
+            "on" => {
+                if app.session.working_dir.is_none() {
+                    app.push_display_message(DisplayMessage::error(
+                        "No working directory. Cannot enable project auth without a project."
+                            .to_string(),
+                    ));
+                    return true;
+                }
+                crate::session_config::set_project_auth_enabled(session_id, true);
+                // Set the process env so credential loading picks it up
+                if let Some(wd) = app.session.working_dir.as_deref() {
+                    let slug = project_slug_from_path(wd);
+                    crate::env::set_var("JCODE_PROJECT_AUTH", &slug);
+                }
+                app.push_display_message(DisplayMessage::system(
+                    "Project auth: ON. Next /login will save credentials for this project."
+                        .to_string(),
+                ));
+                app.set_status_notice("Project auth ON");
+            }
+            "off" => {
+                crate::session_config::set_project_auth_enabled(session_id, false);
+                crate::env::remove_var("JCODE_PROJECT_AUTH");
+                app.push_display_message(DisplayMessage::system(
+                    "Project auth: OFF. Credentials will be global again.".to_string(),
+                ));
+                app.set_status_notice("Project auth OFF");
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /auth project [on|off|status]".to_string(),
+                ));
+            }
         }
-
-        if name.is_empty() || api_key.is_empty() {
-            app.push_display_message(DisplayMessage::error(
-                "Usage: /auth project <name> <api-key> [--base-url <url>] [--type <type>]"
-                    .to_string(),
-            ));
-            return true;
-        }
-        handle_project_auth(app, &name, &api_key, base_url.as_deref(), provider_type.as_deref());
         return true;
     }
 
@@ -1210,145 +1205,9 @@ fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> String {
     sections.join("\n\n")
 }
 
-/// Handle `/auth project <name> <api-key> [--base-url <url>] [--type <type>]`
-/// Creates a project-level provider in `.jcode/config.toml` and saves the API key
-/// to `~/.jcode/<name>.env`.
-fn handle_project_auth(
-    app: &mut App,
-    name: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-    provider_type: Option<&str>,
-) {
-    let working_dir = match app.session.working_dir.as_deref() {
-        Some(wd) => wd.to_string(),
-        None => {
-            app.push_display_message(DisplayMessage::error(
-                "No working directory set for this session. Cannot determine project root."
-                    .to_string(),
-            ));
-            return;
-        }
-    };
-
-    // Validate the provider name is a valid env file/key name
-    let env_file = format!("{}.env", name);
-    let api_key_env = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
-    if !crate::provider_catalog::is_safe_env_file_name(&env_file) {
-        app.push_display_message(DisplayMessage::error(format!(
-            "Invalid provider name '{}'. Use only letters, digits, and hyphens.",
-            name
-        )));
-        return;
-    }
-    if !crate::provider_catalog::is_safe_env_key_name(&api_key_env) {
-        app.push_display_message(DisplayMessage::error(format!(
-            "Generated env key '{}' is invalid. Use a simpler provider name.",
-            api_key_env
-        )));
-        return;
-    }
-
-    // Find or create .jcode/ directory in the project root
-    let project_config_path = crate::config::find_project_config_path(&working_dir)
-        .unwrap_or_else(|| {
-            let root = PathBuf::from(&working_dir);
-            // Walk up to find a reasonable root (where .git exists, or the working_dir itself)
-            let mut dir = root.clone();
-            loop {
-                if dir.join(".git").exists() || !dir.pop() {
-                    break;
-                }
-            }
-            // If we found .git, use that dir; otherwise use working_dir
-            let base = if dir.join(".git").exists() {
-                dir
-            } else {
-                root
-            };
-            base.join(".jcode").join("config.toml")
-        });
-
-    // Ensure the .jcode directory exists
-    if let Some(parent) = project_config_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to create .jcode directory: {}",
-                e
-            )));
-            return;
-        }
-    }
-
-    // Resolve the provider type and base URL
-    let resolved_type = provider_type.unwrap_or("openai-compatible");
-    let resolved_url = base_url.unwrap_or("https://openrouter.ai/api/v1");
-
-    // Build the provider config TOML entry
-    let provider_config = format!(
-        r#"
-[providers.{}]
-type = "{}"
-base_url = "{}"
-api_key_env = "{}"
-env_file = "{}"
-"#,
-        name, resolved_type, resolved_url, api_key_env, env_file
-    );
-
-    // Write or append to the project config file
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&project_config_path)
-    {
-        Ok(mut file) => {
-            use std::io::Write;
-            // Add a newline separator before the new section
-            if let Err(e) = writeln!(file, "{}", provider_config) {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to write project config: {}",
-                    e
-                )));
-                return;
-            }
-        }
-        Err(e) => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to open project config file: {}",
-                e
-            )));
-            return;
-        }
-    }
-
-    // Save the API key to the env file
-    if let Err(e) = crate::provider_catalog::save_env_value_to_env_file(
-        &api_key_env,
-        &env_file,
-        Some(api_key),
-    ) {
-        app.push_display_message(DisplayMessage::error(format!(
-            "Failed to save API key: {}",
-            e
-        )));
-        return;
-    }
-
-    // Invalidate auth cache so the new provider shows up
-    crate::auth::AuthStatus::invalidate_cache();
-
-    app.push_display_message(DisplayMessage::system(format!(
-        "Project provider '{}' created.\n\
-         Config: {}\n\
-         Key saved to: ~/.jcode/{}\n\
-         Use /model {} to select it.",
-        name,
-        project_config_path.display(),
-        env_file,
-        name
-    )));
-    app.set_status_notice(format!("Project auth: {}", name));
+/// Generate a filesystem-safe slug from a project path for credential scoping.
+fn project_slug_from_path(path: &str) -> String {
+    jcode_app_core::session_config::project_slug_from_path(path)
 }
 
 #[cfg(test)]

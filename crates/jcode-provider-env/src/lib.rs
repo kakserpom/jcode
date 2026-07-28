@@ -104,6 +104,30 @@ pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option
         return Some(key);
     }
 
+    // Check JCODE_PROJECT_AUTH env var for project-scoped credentials
+    if let Ok(project_slug) = std::env::var("JCODE_PROJECT_AUTH") {
+        if is_safe_env_file_name(&project_slug) {
+            let project_dir = jcode_storage::app_config_dir()
+                .ok()
+                .map(|d| d.join("projects").join(&project_slug));
+            if let Some(project_path) = project_dir {
+                let config_path = project_path.join(file_name);
+                if config_path.exists() {
+                    jcode_storage::harden_secret_file_permissions(&config_path);
+                    let content = std::fs::read_to_string(config_path).ok()?;
+                    let prefix = format!("{}=", env_key);
+                    for line in content.lines() {
+                        if let Some(key) = line.strip_prefix(&prefix)
+                            && let Some(key) = clean_loaded_value(key, env_key)
+                        {
+                            return Some(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let config_path = jcode_storage::app_config_dir().ok()?.join(file_name);
     jcode_storage::harden_secret_file_permissions(&config_path);
     let content = std::fs::read_to_string(config_path).ok()?;
@@ -219,7 +243,20 @@ pub fn save_env_value_to_env_file(
     }
 
     let config_dir = jcode_storage::app_config_dir()?;
-    let file_path = config_dir.join(file_name);
+
+    // If JCODE_PROJECT_AUTH is set, save to a project-scoped path
+    let file_path = if let Ok(project_slug) = std::env::var("JCODE_PROJECT_AUTH") {
+        if is_safe_env_file_name(&project_slug) {
+            let project_dir = config_dir.join("projects").join(&project_slug);
+            std::fs::create_dir_all(&project_dir)?;
+            project_dir.join(file_name)
+        } else {
+            config_dir.join(file_name)
+        }
+    } else {
+        config_dir.join(file_name)
+    };
+
     jcode_storage::upsert_env_file_value(&file_path, env_key, value)?;
 
     if let Some(value) = value {
