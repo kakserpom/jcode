@@ -701,6 +701,62 @@ impl Default for DictationConfig {
     }
 }
 
+/// Find a `.jcode/config.toml` in the working directory or any parent.
+/// Walks up from `working_dir` looking for `.jcode/config.toml`,
+/// similar to how git finds `.git/config`.
+pub fn find_project_config_path(working_dir: &str) -> Option<PathBuf> {
+    let mut dir = PathBuf::from(working_dir);
+    loop {
+        let candidate = dir.join(".jcode").join("config.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Load the `[providers]` section from a project-level `.jcode/config.toml`.
+/// Returns an empty map if the file doesn't exist or has no providers section.
+pub fn load_project_providers(working_dir: &str) -> BTreeMap<String, NamedProviderConfig> {
+    let path = match find_project_config_path(working_dir) {
+        Some(p) => p,
+        None => return BTreeMap::new(),
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return BTreeMap::new(),
+    };
+    // Parse only the [providers] section using a minimal struct
+    #[derive(serde::Deserialize)]
+    struct ProjectConfig {
+        #[serde(default)]
+        providers: BTreeMap<String, NamedProviderConfig>,
+    }
+    match toml::from_str::<ProjectConfig>(&content) {
+        Ok(cfg) => cfg.providers,
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+/// Merge project-level providers into the global config's providers map.
+/// Project providers override global providers with the same key.
+/// Returns the merged providers map.
+pub fn merge_providers_with_project(
+    global_providers: &BTreeMap<String, NamedProviderConfig>,
+    working_dir: Option<&str>,
+) -> BTreeMap<String, NamedProviderConfig> {
+    let mut merged = global_providers.clone();
+    if let Some(wd) = working_dir {
+        let project = load_project_providers(wd);
+        for (key, val) in project {
+            merged.insert(key, val);
+        }
+    }
+    merged
+}
+
 mod config_file;
 mod default_file;
 mod display_summary;
