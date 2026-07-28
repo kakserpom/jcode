@@ -6,27 +6,62 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    // /auth project <name> <api-key> — create a project-level provider
+    // /auth project <name> <api-key> [--base-url <url>] [--type <type>]
+    // Creates a project-level provider in .jcode/config.toml
     if let Some(rest) = trimmed.strip_prefix("/auth project ") {
         let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
         if parts.len() < 2 {
             app.push_display_message(DisplayMessage::error(
-                "Usage: /auth project <name> <api-key>\n\
+                "Usage: /auth project <name> <api-key> [--base-url <url>] [--type <type>]\n\
                  Creates a project-level provider in .jcode/config.toml\n\
-                 Example: /auth project my-openrouter sk-or-v1-xxxxx"
+                 Examples:\n\
+                   /auth project my-openrouter sk-or-v1-xxxxx\n\
+                   /auth project my-groq gsk-xxxx --base-url https://api.groq.com/openai/v1\n\
+                   /auth project my-deepseek sk-xxxx --base-url https://api.deepseek.com/v1"
                     .to_string(),
             ));
             return true;
         }
-        let name = parts[0].trim();
-        let api_key = parts[1].trim();
+        let name = parts[0].trim().to_string();
+        let rest = parts[1].trim();
+
+        // Parse optional --base-url and --type flags
+        let mut api_key = String::new();
+        let mut base_url = None;
+        let mut provider_type = None;
+        let mut i = 0;
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        while i < tokens.len() {
+            match tokens[i] {
+                "--base-url" | "--base_url" | "--baseurl" => {
+                    i += 1;
+                    if i < tokens.len() {
+                        base_url = Some(tokens[i].to_string());
+                    }
+                }
+                "--type" => {
+                    i += 1;
+                    if i < tokens.len() {
+                        provider_type = Some(tokens[i].to_string());
+                    }
+                }
+                _ => {
+                    if api_key.is_empty() {
+                        api_key = tokens[i].to_string();
+                    }
+                }
+            }
+            i += 1;
+        }
+
         if name.is_empty() || api_key.is_empty() {
             app.push_display_message(DisplayMessage::error(
-                "Usage: /auth project <name> <api-key>".to_string(),
+                "Usage: /auth project <name> <api-key> [--base-url <url>] [--type <type>]"
+                    .to_string(),
             ));
             return true;
         }
-        handle_project_auth(app, name, api_key);
+        handle_project_auth(app, &name, &api_key, base_url.as_deref(), provider_type.as_deref());
         return true;
     }
 
@@ -1175,9 +1210,16 @@ fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> String {
     sections.join("\n\n")
 }
 
-/// Handle `/auth project <name> <api-key>` — creates a project-level provider
-/// in `.jcode/config.toml` and saves the API key to `~/.jcode/<name>.env`.
-fn handle_project_auth(app: &mut App, name: &str, api_key: &str) {
+/// Handle `/auth project <name> <api-key> [--base-url <url>] [--type <type>]`
+/// Creates a project-level provider in `.jcode/config.toml` and saves the API key
+/// to `~/.jcode/<name>.env`.
+fn handle_project_auth(
+    app: &mut App,
+    name: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    provider_type: Option<&str>,
+) {
     let working_dir = match app.session.working_dir.as_deref() {
         Some(wd) => wd.to_string(),
         None => {
@@ -1238,16 +1280,20 @@ fn handle_project_auth(app: &mut App, name: &str, api_key: &str) {
         }
     }
 
+    // Resolve the provider type and base URL
+    let resolved_type = provider_type.unwrap_or("openai-compatible");
+    let resolved_url = base_url.unwrap_or("https://openrouter.ai/api/v1");
+
     // Build the provider config TOML entry
     let provider_config = format!(
         r#"
 [providers.{}]
-type = "openai-compatible"
-base_url = "https://openrouter.ai/api/v1"
+type = "{}"
+base_url = "{}"
 api_key_env = "{}"
 env_file = "{}"
 "#,
-        name, api_key_env, env_file
+        name, resolved_type, resolved_url, api_key_env, env_file
     );
 
     // Write or append to the project config file
