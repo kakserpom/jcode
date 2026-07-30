@@ -247,6 +247,14 @@ pub struct TodoPlan {
         skip_serializing_if = "Option::is_none"
     )]
     pub understands_user_intent: Option<u8>,
+    /// Every distinct `understands_user_intent` value this plan has carried,
+    /// oldest first, ending with the current one. Maintained by the todo tool,
+    /// not the model: understanding of a request typically starts low and rises
+    /// as the agent explores, so the trajectory distinguishes an agent that
+    /// resolved the ambiguity by investigating from one that never did.
+    /// Model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub understands_user_intent_history: Vec<u8>,
 }
 
 /// A plan field changed by a todo-tool update.
@@ -271,20 +279,32 @@ pub struct TodoPlanChange {
 /// A goal-level assessment attached to a todo group (or, for an ungrouped
 /// flat list, the whole list as one implicit goal with `group: None`).
 ///
-/// Hill-climbability is a property of an objective, not of individual steps:
-/// "optimize grep latency" is hill-climbable because progress has a metric,
-/// while "design an onboarding screen" is not because success is a taste
-/// judgment. Items like "read the auth code" have no meaningful score of
+/// A closed feedback loop is a property of an objective, not of individual
+/// steps: "optimize grep latency" can close its loop because progress has a
+/// metric, while "design an onboarding screen" cannot because success is a
+/// taste judgment. Items like "read the auth code" have no meaningful score of
 /// their own, so the score lives here instead of on `TodoItem`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoGoal {
     /// Group label this goal describes. `None` covers the ungrouped list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// How hill-climbable this goal is, from 0-100: can progress be measured
-    /// against a quantifiable, verifiable objective and iterated on?
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hill_climbability: Option<u8>,
+    /// From 0-100: how much of this goal's correctness `feedback_loop` can
+    /// report on its own, without the agent's judgment or the user's.
+    #[serde(
+        default,
+        alias = "hill_climbability",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub closed_feedback_loop: Option<u8>,
+    /// Every distinct `closed_feedback_loop` value this goal has carried, oldest
+    /// first. Tool-maintained; model-supplied values are ignored.
+    #[serde(
+        default,
+        alias = "hill_climbability_history",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub closed_feedback_loop_history: Vec<u8>,
     /// The concrete feedback loop used to judge whether each iteration improves
     /// the outcome (e.g. a benchmark command and the metric it reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +314,10 @@ pub struct TodoGoal {
     /// validation, cleanup, and explicit disclosure of remaining gaps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_to_end_ownership: Option<u8>,
+    /// Every distinct `end_to_end_ownership` value this goal has carried,
+    /// oldest first. Tool-maintained; model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub end_to_end_ownership_history: Vec<u8>,
 }
 
 /// A goal field changed by a todo-tool update. This lets transcript renderers
@@ -301,7 +325,8 @@ pub struct TodoGoal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoGoalField {
-    HillClimbability,
+    #[serde(alias = "hill_climbability")]
+    ClosedFeedbackLoop,
     FeedbackLoop,
     EndToEndOwnership,
 }

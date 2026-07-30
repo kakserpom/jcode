@@ -1,9 +1,9 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::{
-    App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, SkillRegistry,
-    commands, ctrl_bracket_fallback_to_esc, is_context_limit_error,
-    is_request_payload_too_large_error, remote,
+    App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
+    ctrl_bracket_fallback_to_esc, is_context_limit_error, is_request_payload_too_large_error,
+    remote,
 };
 use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
@@ -602,6 +602,7 @@ where
     true
 }
 
+pub(in crate::tui::app) mod newline;
 mod paste_guard;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
@@ -719,7 +720,7 @@ pub(super) fn promote_dropped_images(app: &mut App) -> bool {
     true
 }
 
-fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
+pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
     let trimmed = text.trim();
     let literal_path = PathBuf::from(trimmed);
     if literal_path.is_file() {
@@ -1089,13 +1090,8 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     true
 }
 
-fn visible_prompt_history(app: &App) -> Vec<String> {
-    app.display_messages
-        .iter()
-        .filter(|message| message.role == "user")
-        .map(|message| message.content.trim().to_string())
-        .filter(|content| !content.is_empty())
-        .collect()
+fn visible_prompt_history(app: &mut App) -> Vec<String> {
+    app.merged_prompt_history()
 }
 
 fn byte_offset_for_line_column(
@@ -1340,6 +1336,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     if let Some(msg) = app.interleave_message.take()
         && !msg.is_empty()
     {
+        app.pending_images.append(&mut app.interleave_images);
         parts.push(msg);
         had_pending = true;
     }
@@ -1383,10 +1380,6 @@ pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
     } else {
         SendAction::Interleave
     }
-}
-
-pub(super) fn handle_shift_enter(app: &mut App) {
-    insert_input_text(app, "\n");
 }
 
 impl App {
@@ -1438,7 +1431,7 @@ impl App {
             self.consecutive_guardrail_stops, cleared, had_overnight
         ));
         self.push_display_message(DisplayMessage::system(format!(
-            "🛑 Auto-poke stopped: the provider guardrail refused {} turns in a row. Re-poking the same request will keep getting refused. Rephrase or narrow the task, then run /poke again to resume.",
+            "🛑 The provider refused {} turns in a row, so we stopped poking. The same request will keep getting refused. Rephrase or narrow the task, then /poke to resume.",
             self.consecutive_guardrail_stops
         )));
         self.set_status_notice("Poke stopped: provider guardrail");
@@ -1454,6 +1447,45 @@ impl App {
         }
         self.schedule_auto_poke_followup_if_needed()
             || self.schedule_overnight_poke_followup_if_needed()
+    }
+
+    /// Deliver this turn's deferred quality-check reminder, if anything is
+    /// still unresolved. Returns true when a continuation was queued.
+    ///
+    /// Delivered at most once per turn: the reminder asks the model to verify
+    /// weak points, and re-asking after it has done so would loop. The
+    /// observation log is cleared either way, so the next turn starts clean.
+    fn deliver_deferred_gate_digest_if_needed(&mut self) -> bool {
+        if self.todo_gate_digest_delivered {
+            return false;
+        }
+        let session_id = self.session_id().to_string();
+        let observations = crate::todo::load_gate_observations(&session_id).unwrap_or_default();
+        if observations.is_empty() {
+            return false;
+        }
+        let plan = crate::todo::load_plan(&session_id).unwrap_or_default();
+        let goals = crate::todo::load_goals(&session_id).unwrap_or_default();
+        let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
+        let _ = crate::todo::clear_gate_observations(&session_id);
+        let Some(digest) = digest else {
+            crate::logging::info(&format!(
+                "TODO_GATE_DIGEST action=skip reason=nothing_to_report observations={}",
+                observations.len()
+            ));
+            return false;
+        };
+        self.todo_gate_digest_delivered = true;
+        crate::logging::info(&format!(
+            "TODO_GATE_DIGEST action=queue observations={}",
+            observations.len()
+        ));
+        self.push_display_message(DisplayMessage::system(
+            "🔎 We asked the agent to double-check this turn's weak points.",
+        ));
+        self.queued_messages.push(digest);
+        self.pending_queued_dispatch = true;
+        true
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
@@ -1479,6 +1511,14 @@ impl App {
                 self.auto_poke_incomplete_todos = false;
                 return false;
             }
+            // Deferred quality checks land here, once, instead of interrupting
+            // every todo write during the turn. Every point recorded during the
+            // turn is raised, including ones whose score later climbed: work
+            // done while the score was low never benefited from the assessment
+            // that arrived after it.
+            if self.deliver_deferred_gate_digest_if_needed() {
+                return true;
+            }
             let confidence_summary = super::commands::todo_confidence_summary(&todos);
             let confidence_label =
                 super::commands::format_todo_completion_confidence(confidence_summary);
@@ -1493,13 +1533,13 @@ impl App {
                     self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
-                    "🛑 Todo completion gate: completion confidence needs stronger validation."
+                    "🛑 The agent marked its work done without strong enough validation. We asked it to double-check."
                 } else {
                     self.todo_confidence_spike_challenged = true;
                     crate::telemetry::record_todo_gate(
                         crate::telemetry::TodoGateKind::ConfidenceSpike,
                     );
-                    "🛑 Todo completion gate: abrupt confidence increase needs independent validation."
+                    "🛑 The agent's confidence jumped suddenly. We asked it to verify that independently."
                 };
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
@@ -1522,19 +1562,23 @@ impl App {
                     self.todo_completion_gate_attempts
                 ));
                 self.push_display_message(DisplayMessage::system(
-                    "⚠️ Todo completion gate: validation still failing after repeated nudges. Auto-poke stopped; review the remaining todos manually.",
+                    "⚠️ We nudged the agent several times but its validation still isn't holding up. We stopped poking; review the remaining todos yourself.",
                 ));
                 self.auto_poke_incomplete_todos = false;
                 self.todo_confidence_spike_challenged = false;
                 self.todo_completion_gate_attempts = 0;
+                self.todo_gate_digest_delivered = false;
                 self.pending_queued_dispatch = false;
                 return false;
             }
             self.auto_poke_incomplete_todos = false;
             self.todo_confidence_spike_challenged = false;
+            // A finished cycle re-arms the review for whatever work comes next;
+            // without this a session could only ever deliver one digest.
+            self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
             self.push_display_message(DisplayMessage::system(format!(
-                "✅ Todos complete. Completion confidence: {}.",
+                "✅ All todos done. Completion confidence: {}.",
                 confidence_label
             )));
             self.pending_queued_dispatch = false;
@@ -1542,7 +1586,7 @@ impl App {
         }
 
         self.push_display_message(DisplayMessage::system(format!(
-            "👉 Auto-poking: {} incomplete todo{}. /poke off to stop.",
+            "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
         )));
@@ -1692,7 +1736,7 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
         SendAction::Queue => queue_message(app),
         SendAction::Interleave => {
             let prepared = take_prepared_input(app);
-            stage_local_interleave(app, prepared.expanded);
+            stage_local_interleave(app, prepared.expanded, prepared.images);
         }
     }
 }
@@ -2092,10 +2136,10 @@ pub(super) fn handle_pre_control_shortcuts(
                 app.set_status_notice("Swarm view closed");
             }
             super::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice("Swarm: alt+n full page · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             super::tui_state::SwarmPanelView::FullPage => {
-                app.set_status_notice("Swarm page: alt+n chat · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_page_hint());
             }
         }
         return true;
@@ -2288,6 +2332,11 @@ pub(super) fn handle_modal_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    if app.prompt_history_search.is_some() {
+        app.handle_prompt_history_search_key(code, modifiers);
+        return Ok(true);
+    }
+
     if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
         return Ok(true);
@@ -2373,6 +2422,7 @@ pub(super) fn handle_global_control_shortcuts(
             if app.is_processing {
                 app.cancel_requested = true;
                 app.interleave_message = None;
+                app.interleave_images.clear();
                 app.pending_soft_interrupts.clear();
                 app.pending_soft_interrupt_requests.clear();
                 if app.cancel_overnight_for_interrupt() {
@@ -2386,14 +2436,20 @@ pub(super) fn handle_global_control_shortcuts(
             true
         }
         KeyCode::Char('r') => {
-            app.recover_session_without_tools();
+            app.open_prompt_history_search();
             true
         }
         KeyCode::Char('a') if app.input.is_empty() => {
             app.copy_chat_viewport_context_to_clipboard();
             true
         }
-        KeyCode::Char('l') => true,
+        // Ctrl+L: terminal-style view clear (context kept). Only reachable
+        // when no side pane claimed 'l' for focus (handle_diagram_ctrl_key
+        // runs first and wins while a diagram or diff pane is available).
+        KeyCode::Char('l') => {
+            app.clear_view_keep_context();
+            true
+        }
         _ => handle_control_key(app, code),
     }
 }
@@ -2412,7 +2468,7 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
             SendAction::Queue => queue_message(app),
             SendAction::Interleave => {
                 let prepared = take_prepared_input(app);
-                stage_local_interleave(app, prepared.expanded);
+                stage_local_interleave(app, prepared.expanded, prepared.images);
             }
         }
     }
@@ -2502,6 +2558,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                         .any(|message| super::commands::is_poke_message(message));
                 app.cancel_requested = true;
                 app.interleave_message = None;
+                app.interleave_images.clear();
                 app.pending_soft_interrupts.clear();
                 app.pending_soft_interrupt_requests.clear();
                 let cancelled_overnight = app.cancel_overnight_for_interrupt();
@@ -2529,6 +2586,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let raw_input = std::mem::take(&mut app.input);
+    app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
     app.pasted_contents.clear();
     let images = std::mem::take(&mut app.pending_images);
@@ -2541,8 +2599,13 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     }
 }
 
-pub(super) fn stage_local_interleave(app: &mut App, content: String) {
+pub(super) fn stage_local_interleave(
+    app: &mut App,
+    content: String,
+    images: Vec<(String, String)>,
+) {
     app.interleave_message = Some(content);
+    app.interleave_images = images;
     app.set_status_notice("⏭ Sending now (interleave)");
 }
 
@@ -2740,9 +2803,9 @@ impl App {
             return Ok(());
         }
 
-        // Shift+Enter and Alt/Option+Enter insert a newline in the input box.
-        if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-            handle_shift_enter(self);
+        // Shift+Enter, Alt/Option+Enter, and the trailing-backslash fallback all
+        // insert a newline in the input box.
+        if newline::enter_inserts_newline(self, code, modifiers) {
             return Ok(());
         }
 
@@ -3000,9 +3063,10 @@ impl App {
     pub(super) async fn send_interleave_now(
         &mut self,
         content: String,
+        images: Vec<(String, String)>,
         remote: &mut crate::tui::backend::RemoteConnection,
     ) {
-        remote::send_interleave_now(self, content, remote).await;
+        remote::send_interleave_now(self, content, images, remote).await;
     }
 
     /// Retrieve all pending unsent messages into the input for editing.
@@ -3522,6 +3586,9 @@ impl App {
         }
 
         let raw_input = std::mem::take(&mut self.input);
+        // Persist to cross-session prompt history (no-op for slash/shell
+        // commands, secret-intercept inputs, and oversized pastes).
+        self.record_prompt_history(&raw_input);
         let mut input = self.expand_paste_placeholders(&raw_input);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;
@@ -3557,28 +3624,7 @@ impl App {
         }
 
         let trimmed = input.trim();
-        let handled = commands::handle_cancel_command(self, trimmed)
-            || commands::handle_help_command(self, trimmed)
-            || commands::handle_keys_command(self, trimmed)
-            || commands::handle_ssh_command(self, trimmed)
-            || commands::handle_session_command(self, trimmed)
-            || commands::handle_dictation_command(self, trimmed)
-            || commands::handle_config_command(self, trimmed)
-            || commands::handle_log_command(self, trimmed)
-            || commands::handle_diff_command(self, trimmed)
-            || commands::handle_model_status_command(self, trimmed)
-            || super::debug::handle_debug_command(self, trimmed)
-            || super::model_context::handle_model_command(self, trimmed)
-            || super::commands::handle_usage_command(self, trimmed)
-            || super::productivity::handle_productivity_command(self, trimmed)
-            || super::commands::handle_feedback_command(self, trimmed)
-            || super::commands::handle_telemetry_command(self, trimmed)
-            || super::support::handle_support_command(self, trimmed)
-            || super::state_ui::handle_info_command(self, trimmed)
-            || super::auth::handle_auth_command(self, trimmed)
-            || super::tui_lifecycle_runtime::handle_dev_command(self, trimmed)
-            || commands::handle_delegate_command(self, trimmed)
-            || commands::handle_mangle_command(self, trimmed);
+        let handled = super::commands_dispatch::dispatch_local_command(self, trimmed);
         if handled {
             if trimmed.starts_with('/') {
                 crate::telemetry::record_command_family(trimmed);
@@ -3617,19 +3663,19 @@ impl App {
             return;
         }
 
-        // A terminal file drop is user input even when its absolute path starts
-        // with `/`. Check the filesystem-aware drop parser before slash routing
-        // so a real file can never collide with a skill name.
+        // File drops remain ordinary input. Registry-aware resolution supports
+        // multi-word skill names without weakening that guard.
+        let initial_snapshot = self.current_skills_snapshot();
         let skill_invocation = parse_dropped_paths(&input)
             .is_none()
-            .then(|| SkillRegistry::parse_invocation(&input))
+            .then(|| initial_snapshot.resolve_invocation(&input))
             .flatten();
 
         // Check for skill invocation.
         if let Some(invocation) = skill_invocation {
             let skill_name = invocation.name.to_string();
             let trailing_prompt = invocation.prompt.map(str::to_string);
-            let mut skill = self.current_skills_snapshot().get(&skill_name).cloned();
+            let mut skill = initial_snapshot.get(&skill_name).cloned();
 
             // Remote/minimal TUI clients may start with an empty skill snapshot, and
             // daemon-side `skill_manage reload_all` can update a different process.
@@ -3693,6 +3739,13 @@ impl App {
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
+
+        // See `stage_turn_for_remote_tick_loop`: a remote client must never
+        // park on the local-only `pending_turn` flag.
+        if super::remote::stage_turn_for_remote_tick_loop(self, &input) {
+            return;
+        }
+
         self.push_display_message(DisplayMessage {
             role: "user".to_string(),
             content: raw_input, // Show placeholder to user (condensed view)

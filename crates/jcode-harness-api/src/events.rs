@@ -88,6 +88,16 @@ pub enum ApiEvent {
     /// The turn finished; the agent is idle.
     TurnDone { session_id: String },
 
+    /// The agent accepted a user message: it is in the session's queue and
+    /// will be processed. Sent once per `SendMessage` that the daemon acks.
+    ///
+    /// Distinct from the request-level `Ok`: `Ok` only says the bridge parsed
+    /// the frame, while this says the agent itself has the message. A client
+    /// that shows "sent" versus "acknowledged" needs the second fact, and
+    /// without it the only proof a message landed is the reply, which can be
+    /// minutes away.
+    MessageAccepted { session_id: String },
+
     /// The harness needs a permission decision from the user.
     PermissionRequest {
         session_id: String,
@@ -98,6 +108,20 @@ pub enum ApiEvent {
 
     /// Session-level status change (idle, generating, tool_running, ...).
     SessionStatus { session_id: String, status: String },
+
+    /// The provider and model serving the attached session.
+    ///
+    /// Sent unsolicited after attach, and again whenever the model changes, so
+    /// a client can show which model it is talking to without polling.
+    ModelInfo {
+        session_id: String,
+        /// Provider name, e.g. `anthropic`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// Model id, e.g. `claude-sonnet-4-20250514`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
 
     /// Forward-compatibility catch-all: clients must skip this silently.
     #[serde(other)]
@@ -122,6 +146,15 @@ pub struct SessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub status: String,
+    /// Size of the session's stored record, in bytes.
+    ///
+    /// A cheap, monotonic proxy for "how much conversation is in here": a
+    /// client can size or sort by it without fetching every transcript, which
+    /// is the difference between an instant overview and one that stalls on a
+    /// dozen history requests. Approximate by design; `None` when the server
+    /// could not determine it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -5,6 +5,7 @@ pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;
 mod catalog_routes;
+pub mod catalog_scheduler;
 pub mod claude;
 pub mod copilot;
 pub mod cursor;
@@ -139,13 +140,13 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
 // Keep inactive direct profiles on the same 15-minute soft-refresh cadence as
 // the active OpenRouter/OpenAI-compatible runtime. We continue serving the
 // cached routes immediately while a background refresh updates the catalog.
-const OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
+pub(crate) const OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
 
 fn openai_compatible_profile_catalog_cache_is_stale(cached_at: u64, now: u64) -> bool {
     now.saturating_sub(cached_at) >= OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS
 }
 
-fn cached_live_models_for_openai_compatible_profile(
+pub(crate) fn cached_live_models_for_openai_compatible_profile(
     resolved: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
 ) -> Option<(Vec<String>, bool)> {
     let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
@@ -179,21 +180,13 @@ fn direct_openai_compatible_profile_routes(
 ) -> Vec<ModelRoute> {
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
     let static_models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
-    let (mut models, from_live_catalog) = if let Some((models, cache_is_stale)) =
+    // Pure read: the catalog scheduler owns refresh cadence, so rendering
+    // routes cannot fan out HTTP requests.
+    let (mut models, from_live_catalog) = if let Some((models, _cache_is_stale)) =
         cached_live_models_for_openai_compatible_profile(&resolved)
     {
-        if cache_is_stale {
-            crate::provider::openrouter::maybe_schedule_openai_compatible_profile_catalog_refresh(
-                profile,
-                "inactive direct profile stale route cache",
-            );
-        }
         (models, true)
     } else {
-        crate::provider::openrouter::maybe_schedule_openai_compatible_profile_catalog_refresh(
-            profile,
-            "inactive direct profile route cache miss",
-        );
         let mut models = static_models;
         if models.is_empty()
             && let Some(default_model) = resolved.default_model.as_ref()
@@ -440,6 +433,16 @@ fn catalog_generation() -> u64 {
     CATALOG_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Invalidate every memoized route catalog in the process.
+///
+/// Called when provider catalogs change out-of-band (background catalog
+/// refresh completion, auth changes). This is what keeps the route memo TTL a
+/// backstop rather than the mechanism: a completed refresh is reflected on the
+/// next render instead of waiting for the memo to expire.
+pub fn bump_catalog_generation() {
+    CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl MultiProvider {
     /// Drop this instance's route-catalog memo. Use for changes that are
     /// captured by [`Self::routes_memo_key`] (model/provider/profile switches):
@@ -523,7 +526,12 @@ impl MultiProvider {
     /// shared memo (so shared-server forks reuse one build), then a
     /// single-flight build that followers wait on instead of duplicating.
     fn fresh_routes_memo_entry(&self) -> RoutesMemoEntry {
-        const ROUTES_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+        // Backstop only: invalidation is event-driven via auth/catalog
+        // generations, so a completed refresh shows up on the next render.
+        const ROUTES_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+        // Rendering no longer schedules catalog I/O; the sweeper does.
+        catalog_scheduler::ensure_started();
 
         let auth_generation = pricing::auth_pricing_generation();
         let catalog_gen = catalog_generation();
@@ -851,6 +859,48 @@ impl MultiProvider {
         Some((profile, rest))
     }
 
+    /// Find the configured OpenAI-compatible profile that serves a bare model
+    /// id, using the live route catalog as the source of truth.
+    ///
+    /// Route specs from the picker carry a `<profile>:<model>` prefix, but
+    /// hand-typed `/model <id>` and saved sessions can carry the bare id. The
+    /// active profile wins when several profiles serve the same id, so a
+    /// re-select of the current model never silently hops endpoints.
+    fn openai_compatible_profile_owning_model(
+        &self,
+        model: &str,
+    ) -> Option<crate::provider_catalog::OpenAiCompatibleProfile> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+
+        let active_profile_id = ProviderRegistry::new(self).active_compatible_profile_id();
+        let mut fallback: Option<String> = None;
+        for route in self.fresh_routes_memo_entry().routes {
+            if !route.available || route.model != model {
+                continue;
+            }
+            let Some(profile_id) = route
+                .api_method
+                .strip_prefix("openai-compatible:")
+                .map(str::trim)
+                .filter(|profile_id| !profile_id.is_empty())
+            else {
+                continue;
+            };
+            if active_profile_id.as_deref() == Some(profile_id) {
+                fallback = Some(profile_id.to_string());
+                break;
+            }
+            if fallback.is_none() {
+                fallback = Some(profile_id.to_string());
+            }
+        }
+
+        crate::provider_catalog::openai_compatible_profile_by_id(&fallback?)
+    }
+
     /// Parse a `<name>:<model>` spec whose prefix is a user-defined named
     /// provider profile from config (`[providers.<name>]`). Built-in provider
     /// prefixes and catalog profile ids take precedence and never reach here.
@@ -1028,7 +1078,6 @@ impl MultiProvider {
                 Ok(())
             }
             ActiveProvider::OpenRouter => {
-                self.clear_active_openai_compatible_profile();
                 // Decide whether the slot must be rebound to the real
                 // OpenRouter API-key runtime. Rebinding repairs a slot left
                 // flavored as a *known catalog profile* runtime by startup
@@ -1060,22 +1109,27 @@ impl MultiProvider {
                                 .unwrap_or(false)
                     }
                 };
-                if needs_rebind {
-                    let provider = external::instantiate_openrouter_runtime(
+                let (openrouter, install_openrouter) = if needs_rebind {
+                    let openrouter = external::instantiate_openrouter_runtime(
                         external::OpenRouterRuntimeSpec::OpenRouterApiKey,
                     )?;
+                    (openrouter, true)
+                } else {
+                    let Some(openrouter) = self.openrouter_provider() else {
+                        anyhow::bail!(
+                            "OpenRouter/OpenAI-compatible credentials not available. Set the configured API key or run `jcode login --provider openrouter` first."
+                        );
+                    };
+                    (openrouter, false)
+                };
+                openrouter.set_model(model)?;
+                if install_openrouter {
                     *self
                         .openrouter
                         .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(openrouter);
                 }
-
-                let Some(openrouter) = self.openrouter_provider() else {
-                    anyhow::bail!(
-                        "OpenRouter/OpenAI-compatible credentials not available. Set the configured API key or run `jcode login --provider openrouter` first."
-                    );
-                };
-                openrouter.set_model(model)?;
+                self.clear_active_openai_compatible_profile();
                 self.set_active_provider(ActiveProvider::OpenRouter);
                 Ok(())
             }
@@ -1851,6 +1905,13 @@ impl Provider for MultiProvider {
             && let Some(target) = provider_from_model_key(target_provider)
         {
             self.set_model_on_provider(target, model)
+        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
+            // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
+            // `mimo-v2.5`, ...) match none of the built-in model-name
+            // heuristics. Without this, `/model <bare-id>` fell through to
+            // whichever provider happened to be active and failed with a
+            // misleading "not supported by <active provider>" error.
+            self.set_model_on_openai_compatible_profile(profile, model)
         } else {
             // Unknown model - try current provider.
             self.set_model_on_provider(self.active_provider(), model)

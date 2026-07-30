@@ -162,6 +162,11 @@ impl Config {
         {
             self.display.pin_images = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_PIN_TODOS")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.display.pin_todos = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_DISPLAY_CENTERED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.centered = parsed;
@@ -206,6 +211,15 @@ impl Config {
             if let Some(mode) = crate::config::ReasoningDisplayMode::parse(&v) {
                 self.display.set_reasoning_display(mode);
             }
+        }
+        // A front-end default, applied only when the user has not made an
+        // explicit choice. The desktop uses this so its transcript shows live
+        // thinking out of the box without silently overriding config.
+        if !self.display.has_explicit_reasoning_display()
+            && let Ok(v) = std::env::var("JCODE_DEFAULT_REASONING_DISPLAY")
+            && let Some(mode) = crate::config::ReasoningDisplayMode::parse(&v)
+        {
+            self.display.set_reasoning_display(mode);
         }
         if let Ok(v) = std::env::var("JCODE_MARKDOWN_SPACING") {
             match v.trim().to_lowercase().as_str() {
@@ -298,6 +312,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_ENABLE_MERMAID") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.mermaid = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AUTO_POKE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.auto_poke = parsed;
             }
         }
         if let Ok(v) = std::env::var("JCODE_MESSAGE_TIMESTAMPS") {

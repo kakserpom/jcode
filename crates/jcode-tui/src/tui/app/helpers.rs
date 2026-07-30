@@ -21,7 +21,7 @@ type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
-/// assessments (hill-climbability etc.). Module-level so the app can force a
+/// assessments (closed feedback loop etc.). Module-level so the app can force a
 /// refresh the moment it persists a todo write locally, instead of showing
 /// the previous list until the TTL lapses.
 type TodosCacheEntry = (
@@ -329,11 +329,56 @@ pub(super) fn format_tokens(tokens: u64) -> String {
     }
 }
 
+/// Test-only clipboard sink.
+///
+/// A headless CI runner has no Wayland socket, no X11 display, and a
+/// non-terminal stdout, so every real clipboard path correctly fails and
+/// `copy_to_clipboard` returns false. Tests that only care about shortcut
+/// wiring (does Alt+S reach the copy handler with the right text?) then fail
+/// for an environment reason rather than a code reason. Capturing into this
+/// sink lets those tests assert the wiring *and* the copied text without
+/// depending on a desktop session (refs #596).
+#[cfg(test)]
+static TEST_CLIPBOARD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Test-only: route clipboard writes into an in-process sink instead of the OS.
+#[cfg(test)]
+pub(crate) fn capture_clipboard_for_tests() {
+    if let Ok(mut sink) = TEST_CLIPBOARD.lock() {
+        *sink = Some(String::new());
+    }
+}
+
+/// Test-only: the last text written while capture was enabled.
+#[cfg(test)]
+pub(crate) fn captured_clipboard_for_tests() -> Option<String> {
+    TEST_CLIPBOARD.lock().ok().and_then(|sink| sink.clone())
+}
+
+/// Test-only: stop capturing and drop any captured text.
+#[cfg(test)]
+pub(crate) fn stop_capturing_clipboard_for_tests() {
+    if let Ok(mut sink) = TEST_CLIPBOARD.lock() {
+        *sink = None;
+    }
+}
+
 /// Copy text to clipboard. On Windows and macOS, the native clipboard API
 /// (arboard) is authoritative, with OSC 52 as a remote-session fallback.
 /// Elsewhere, try wl-copy first (Wayland), then OSC 52 (works over SSH /
 /// Docker / tmux), then arboard as a final fallback.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
+    // Tests that opted into capture never touch the real clipboard, so they
+    // behave identically on a desktop and on a headless runner.
+    #[cfg(test)]
+    if let Ok(mut sink) = TEST_CLIPBOARD.lock()
+        && let Some(captured) = sink.as_mut()
+    {
+        captured.clear();
+        captured.push_str(text);
+        return true;
+    }
+
     // On Windows, the native clipboard API must run before OSC 52. Writing an
     // OSC 52 sequence to stdout "succeeds" even when the console (conhost,
     // older Windows Terminal) silently ignores it, which reported "Copied"
@@ -978,7 +1023,7 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 
 /// Fetch a session's todos plus its goal-level assessments through the same
 /// stale-while-revalidate cache, so the info widget can render goal metadata
-/// (hill-climbability and objectives) without extra disk reads per frame.
+/// (closed feedback loop and objectives) without extra disk reads per frame.
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {

@@ -108,6 +108,7 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.auto_poke_incomplete_todos = false;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
+    app.todo_gate_digest_delivered = false;
     cleared
 }
 
@@ -181,7 +182,7 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
     app.rate_limit_pending_message = None;
     app.rate_limit_reset = None;
     app.push_display_message(DisplayMessage::system(format!(
-        "🛑 Auto-poke stopped because the last request failed with a non-retryable error.{} Fix the request/session, then run /poke again if you want to resume.",
+        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking.{} Fix the request or session, then /poke to resume.",
         if cleared == 0 {
             String::new()
         } else {
@@ -192,7 +193,7 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
             )
         }
     )));
-    app.set_status_notice("Poke stopped: non-retryable error");
+    app.set_status_notice("Poke stopped: this error won't fix itself");
     true
 }
 
@@ -212,19 +213,19 @@ pub(super) fn poke_disabled_message(cleared: usize) -> String {
 }
 
 pub(super) fn poke_enabled_without_incomplete_message() -> String {
-    "Auto-poke enabled. No incomplete todos found right now.".to_string()
+    "Auto-poke enabled. Nothing unfinished right now; we'll poke the agent if it stops with todos left.".to_string()
 }
 
 pub(super) fn poke_queued_display_message() -> String {
     format!(
-        "👉 /poke queued. Re-checking incomplete todos after this turn. {}",
+        "👉 Poke queued. We'll re-check for unfinished todos after this turn. {}",
         POKE_OFF_UI_HINT
     )
 }
 
 pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String {
     format!(
-        "👉 Poking model: {} incomplete todo{}. {}",
+        "👉 {} incomplete todo{}. We poked the agent. {}",
         incomplete_count,
         if incomplete_count == 1 { "" } else { "s" },
         POKE_OFF_UI_HINT,
@@ -236,6 +237,9 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.auto_poke_incomplete_todos = true;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
+    // Re-arming starts a fresh review cycle, so the deferred quality digest is
+    // eligible to be delivered again for the upcoming work.
+    app.todo_gate_digest_delivered = false;
     // Re-arming is an explicit user action: give the guardrail circuit
     // breaker its full budget again (the user likely rephrased the task).
     app.consecutive_guardrail_stops = 0;
@@ -518,6 +522,7 @@ pub(super) fn handle_transfer_command_local(app: &mut App) {
     app.pending_transfer_request = true;
     if app.is_processing {
         app.interleave_message = Some(transfer_pause_message());
+        app.interleave_images.clear();
         app.push_display_message(DisplayMessage::system(
             "Queued /transfer. The current session will be asked to pause, then the compacted handoff will open in a new window."
                 .to_string(),
@@ -826,6 +831,7 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
     if app.is_processing {
         app.cancel_requested = true;
         app.interleave_message = None;
+        app.interleave_images.clear();
         app.pending_soft_interrupts.clear();
         app.pending_soft_interrupt_requests.clear();
         if app.cancel_overnight_for_interrupt() {
@@ -1629,6 +1635,7 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     if handle_subagent_model_command(app, trimmed)
         || app.handle_hotkeys_command(trimmed)
+        || app.handle_terminal_setup_command(trimmed)
         || handle_subagent_command(app, trimmed)
         || handle_observe_command(app, trimmed)
         || handle_todos_view_command(app, trimmed)
@@ -1672,6 +1679,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    // After `/remote-release`: the parser claims only `/remote` + whitespace/end.
+    if super::commands_remote::handle_remote_command(app, trimmed) {
+        return true;
+    }
+
     if trimmed == "/triage" || trimmed.starts_with("/triage ") {
         let rest = trimmed.strip_prefix("/triage").unwrap_or_default();
         handle_triage_command_local(app, rest);
@@ -1712,6 +1724,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/clear" {
         reset_current_session(app);
+        return true;
+    }
+
+    if trimmed == "/cls" || trimmed == "/clear-view" {
+        app.clear_view_keep_context();
         return true;
     }
 
@@ -3009,9 +3026,9 @@ fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {
     if rest.is_empty() || matches!(rest, "show" | "status") {
         let saved = crate::config::Config::load().display.centered;
         app.push_display_message(DisplayMessage::system(format!(
-            "Alignment is currently {}.\nSaved default: {}.\n\nUse /alignment centered or /alignment left to change it permanently, or press Alt+C to toggle it for the current session.",
+            "Alignment is currently {}.\nSaved default: {}.\n\nUse /alignment centered or /alignment left to change it permanently, or press {} to toggle it for the current session.",
             alignment_label(app.centered),
-            alignment_label(saved)
+            alignment_label(saved), jcode_tui_core::keybind::alt_chord("C")
         )));
         return true;
     }
@@ -3699,10 +3716,6 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     ));
     app.set_status_notice("Feedback recorded");
     true
-}
-
-pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
-    super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
 }
 
 /// `/telemetry [everything|no-prompts|nothing]` - show or change the same

@@ -5,6 +5,7 @@ use crate::side_panel::{
 use crate::todo::TodoItem;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 pub(super) const TODOS_VIEW_PAGE_ID: &str = "session_todos";
 const TODOS_VIEW_TITLE: &str = "Todos";
@@ -75,6 +76,60 @@ impl App {
         self.todo_card_rendered_hash = next_hash;
         let content = todo_card_payload_json(&todos, &plan, &goals);
         self.replace_display_message_content(idx, content)
+    }
+
+    /// Live-refresh the payload behind the pinned todo band
+    /// (`display.pin_todos`). Returns true when the payload changed and the
+    /// viewport should redraw. Disk reads are throttled to once per second.
+    pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
+        if !crate::config::config().display.pin_todos {
+            if self.pinned_todos_payload.is_some() {
+                self.pinned_todos_payload = None;
+                self.pinned_todos_rendered_hash = 0;
+                return true;
+            }
+            return false;
+        }
+        const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        if let Some(checked_at) = self.pinned_todos_checked_at
+            && checked_at.elapsed() < REFRESH_INTERVAL
+        {
+            return false;
+        }
+        self.pinned_todos_checked_at = Some(Instant::now());
+        let session_id = self.active_client_session_id().map(str::to_string);
+        let todos = load_current_session_todos(session_id.as_deref());
+        if todos.is_empty() {
+            if self.pinned_todos_payload.is_some() {
+                self.pinned_todos_payload = None;
+                self.pinned_todos_rendered_hash = 0;
+                return true;
+            }
+            return false;
+        }
+        let goals = load_current_session_goals(session_id.as_deref());
+        let plan = load_current_session_plan(session_id.as_deref());
+        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals);
+        if next_hash == self.pinned_todos_rendered_hash && self.pinned_todos_payload.is_some() {
+            return false;
+        }
+        self.pinned_todos_rendered_hash = next_hash;
+        self.pinned_todos_payload = Some(todo_card_payload_json(&todos, &plan, &goals));
+        true
+    }
+
+    /// The pinned-band renderer that reads this is landing separately, so the
+    /// accessor is allowed to be unused (outside tests) until it does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn pinned_todos_payload_ref(&self) -> Option<&str> {
+        self.pinned_todos_payload.as_deref()
+    }
+
+    /// Force the pinned todo band to re-read state on the next tick, bypassing
+    /// the 1s throttle. Used right after the user toggles `/todos pin`.
+    pub(super) fn refresh_pinned_todos_now(&mut self) {
+        self.pinned_todos_checked_at = None;
+        self.refresh_pinned_todos_if_needed();
     }
 
     pub(super) fn set_todos_view_enabled(&mut self, enabled: bool, focus: bool) {
@@ -203,9 +258,14 @@ impl App {
 
 pub(super) fn todos_view_status_message(app: &App) -> String {
     format!(
-        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nWhen the panel screen is enabled (/todos panel), the side panel shows a transient Todos page dedicated to the current session's todo list and refreshes as the list changes. It is not persisted to session side-panel storage.",
+        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nPinned todo band: {}\n\nWhen the panel screen is enabled (/todos panel), the side panel shows a transient Todos page dedicated to the current session's todo list and refreshes as the list changes. It is not persisted to session side-panel storage.\n\nWhen the pinned band is enabled (/todos pin), the full todo list stays pinned to the top of the chat transcript while it scrolls, like the previous-prompt preview.",
         crate::tui::keybind::todo_card_key_label(),
         if app.todos_view_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if crate::config::config().display.pin_todos {
             "enabled"
         } else {
             "disabled"
@@ -260,6 +320,33 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
                 "Todo screen disabled.".to_string(),
             ));
         }
+        // Pin the full todo list to the top of the chat transcript.
+        "pin" | "pin on" | "pin off" => {
+            let enabled = match arg {
+                "pin on" => true,
+                "pin off" => false,
+                _ => !crate::config::config().display.pin_todos,
+            };
+            app.set_status_notice(if enabled {
+                "Pinned todos: ON"
+            } else {
+                "Pinned todos: OFF"
+            });
+            match crate::config::Config::set_pin_todos(enabled) {
+                Ok(()) => app.push_display_message(crate::tui::DisplayMessage::system(
+                    if enabled {
+                        "Pinned todo band enabled. The todo list stays pinned to the top of the transcript while it scrolls."
+                    } else {
+                        "Pinned todo band disabled."
+                    }
+                    .to_string(),
+                )),
+                Err(error) => app.push_display_message(crate::tui::DisplayMessage::error(
+                    format!("Failed to save display.pin_todos: {}", error),
+                )),
+            }
+            app.refresh_pinned_todos_now();
+        }
         "status" => {
             app.push_display_message(crate::tui::DisplayMessage::system(
                 todos_view_status_message(app),
@@ -267,7 +354,7 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
         }
         _ => {
             app.push_display_message(crate::tui::DisplayMessage::error(
-                "Usage: /todos [card|panel|on|off|status]".to_string(),
+                "Usage: /todos [card|panel|pin|on|off|status]".to_string(),
             ));
         }
     }
@@ -446,9 +533,9 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         return String::new();
     };
     let mut line = String::new();
-    if let Some(score) = goal.hill_climbability {
+    if let Some(score) = goal.closed_feedback_loop {
         line.push('\n');
-        line.push_str(&format!("- Hill climbability: **{}%**\n", score));
+        line.push_str(&format!("- Closed feedback loop: **{}%**\n", score));
     }
     if let Some(feedback_loop) = goal
         .feedback_loop
@@ -648,7 +735,7 @@ fn hash_todos_payload(
     plan.understands_user_intent.hash(&mut hasher);
     for goal in goals {
         goal.group.hash(&mut hasher);
-        goal.hill_climbability.hash(&mut hasher);
+        goal.closed_feedback_loop.hash(&mut hasher);
         goal.feedback_loop.hash(&mut hasher);
         goal.end_to_end_ownership.hash(&mut hasher);
     }
@@ -675,6 +762,7 @@ mod tests {
         crate::todo::TodoPlan {
             user_intention: Some("make navigation feel immediate".to_string()),
             understands_user_intent: Some(96),
+            ..Default::default()
         }
     }
 
@@ -778,11 +866,12 @@ mod tests {
             &plan(),
             &[crate::todo::TodoGoal {
                 group: Some("optimize rendering".to_string()),
-                hill_climbability: Some(90),
+                closed_feedback_loop: Some(90),
                 feedback_loop: Some(
                     "run the frame benchmark and compare p95 frame time".to_string(),
                 ),
                 end_to_end_ownership: Some(85),
+                ..Default::default()
             }],
         );
 
@@ -800,7 +889,7 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("- Hill climbability: **90%**"),
+            markdown.contains("- Closed feedback loop: **90%**"),
             "{markdown}"
         );
         assert!(
@@ -837,7 +926,7 @@ mod tests {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         let goals = vec![crate::todo::TodoGoal {
-            hill_climbability: Some(30),
+            closed_feedback_loop: Some(30),
             ..Default::default()
         }];
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);

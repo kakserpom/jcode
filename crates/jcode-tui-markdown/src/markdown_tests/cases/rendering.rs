@@ -5,6 +5,33 @@ fn test_simple_markdown() {
 }
 
 #[test]
+fn test_h1_h2_headings_render_bold_and_underlined() {
+    let lines = render_markdown("# Title\n\n## Section\n\n### Sub\n\nbody");
+    let heading_mods = |needle: &str| {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains(needle))
+            .map(|s| s.style.add_modifier)
+            .unwrap_or_else(|| panic!("missing heading span {needle}"))
+    };
+    for needle in ["Title", "Section"] {
+        let mods = heading_mods(needle);
+        assert!(mods.contains(Modifier::BOLD), "{needle} should be bold");
+        assert!(
+            mods.contains(Modifier::UNDERLINED),
+            "{needle} should be underlined"
+        );
+    }
+    let sub = heading_mods("Sub");
+    assert!(sub.contains(Modifier::BOLD), "h3 stays bold");
+    assert!(
+        !sub.contains(Modifier::UNDERLINED),
+        "h3 should not be underlined"
+    );
+}
+
+#[test]
 fn test_latex_none_mode_helpers_preserve_source_and_delimiters() {
     assert_eq!(
         line_to_string(&Line::from(raw_math_inline_span(r"x^2 + \alpha"))),
@@ -408,7 +435,9 @@ fn test_mermaid_renders_inline_even_in_pinned_diagram_mode() {
 fn test_inline_math_render() {
     let lines = render_markdown(r"Area is $\pi a^2$.");
     let rendered = lines_to_string(&lines);
-    assert!(rendered.contains("πa²"), "{rendered}");
+    // 0716055ae deliberately preserves the separator after word commands, so
+    // `\pi a^2` reads as `π a²` rather than `πa²`.
+    assert!(rendered.contains("π a²"), "{rendered}");
     assert!(!rendered.contains(r"\pi"), "{rendered}");
 }
 

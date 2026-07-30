@@ -1,3 +1,4 @@
+use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -796,11 +797,16 @@ pub(super) async fn handle_client(
                             ));
                             continue;
                         };
-                        let encoded_event = crate::protocol::encode_event(&event);
-                        if last_available_models_snapshot.as_ref() == Some(&encoded_event) {
+                        // Compare on an age-insensitive key: route details carry
+                        // cosmetic "12m ago" cache ages that tick on their own,
+                        // and a raw byte compare treated that drift as a real
+                        // catalog change, fanning a full repaint out to every
+                        // connected client.
+                        let dedup_key = available_models_dedup_key(&event);
+                        if last_available_models_snapshot.as_ref() == Some(&dedup_key) {
                             continue;
                         }
-                        let encoded_len = encoded_event.len();
+                        let encoded_len = crate::protocol::encode_event(&event).len();
                         if encoded_len > MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES {
                             // Don't drop the catalog update entirely: clients still
                             // need fresh model names for the picker. Strip the heavy
@@ -829,11 +835,11 @@ pub(super) async fn handle_client(
                                     ));
                                 }
                             }
-                            last_available_models_snapshot = Some(encoded_event);
+                            last_available_models_snapshot = Some(dedup_key);
                             continue;
                         }
                         let _ = client_event_tx.send(event);
-                        last_available_models_snapshot = Some(encoded_event);
+                        last_available_models_snapshot = Some(dedup_key);
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
@@ -1140,11 +1146,13 @@ pub(super) async fn handle_client(
             Request::SoftInterrupt {
                 id,
                 content,
+                images,
                 urgent,
             } => {
                 queue_soft_interrupt(
                     id,
                     content,
+                    images,
                     urgent,
                     SoftInterruptSource::User,
                     &session_control,
@@ -3045,7 +3053,7 @@ async fn cancel_processing_message(
 
 fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
     let event = try_available_models_updated_event(agent)?;
-    Some(crate::protocol::encode_event(&event))
+    Some(available_models_dedup_key(&event))
 }
 
 /// Build a names-only copy of an `AvailableModelsUpdated` event by dropping the
@@ -3072,6 +3080,7 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
 fn queue_soft_interrupt(
     id: u64,
     content: String,
+    images: Vec<(String, String)>,
     urgent: bool,
     source: SoftInterruptSource,
     session_control: &SessionControlHandle,
@@ -3083,7 +3092,7 @@ fn queue_soft_interrupt(
         "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={}",
         id, session_control.session_id, source, urgent, content_bytes, content_chars
     ));
-    let queued = session_control.queue_soft_interrupt(content, urgent, source);
+    let queued = session_control.queue_soft_interrupt(content, images, urgent, source);
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",

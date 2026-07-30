@@ -22,6 +22,9 @@ impl App {
             "clear" => {
                 "/clear\nClear current conversation, queue, and display; starts a fresh session."
             }
+            "cls" | "clear-view" => {
+                "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. Also on Ctrl+L."
+            }
             "model" => {
                 "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
             }
@@ -47,7 +50,7 @@ impl App {
                 "/observe\nToggle transient observe mode for the side panel.\n\n/observe on\nEnable observe mode and focus the observe page.\n\n/observe off\nDisable observe mode.\n\n/observe status\nShow whether observe mode is enabled.\n\nObserve mode shows only the latest tool call or tool result added to context, and it is not persisted to disk."
             }
             "todos" | "todo" => {
-                "/todos\nShow the current session's todo list as an inline card in the chat (press again, or the todo-card hotkey, to dismiss the trailing card). The card live-updates as the todo list changes.\n\n/todos panel\nToggle the legacy dedicated todo screen in the side panel.\n\n/todos on\nEnable the side-panel todo screen and focus it.\n\n/todos off\nDisable the side-panel todo screen.\n\n/todos status\nShow todo card/panel status."
+                "/todos\nShow the current session's todo list as an inline card in the chat (press again, or the todo-card hotkey, to dismiss the trailing card). The card live-updates as the todo list changes.\n\n/todos panel\nToggle the legacy dedicated todo screen in the side panel.\n\n/todos pin\nToggle pinning the full todo list to the top of the chat transcript while it scrolls (saved to config as display.pin_todos, off by default).\n\n/todos on\nEnable the side-panel todo screen and focus it.\n\n/todos off\nDisable the side-panel todo screen.\n\n/todos status\nShow todo card/panel/pin status."
             }
             "splitview" | "split-view" => {
                 "/splitview\nToggle a transient split view that mirrors the current chat in the side panel.\n\n/splitview on\nEnable split view and focus the mirrored chat page.\n\n/splitview off\nDisable split view.\n\n/splitview status\nShow whether split view is enabled.\n\nThis gives the side panel its own scroll position for the same conversation so you can read older context while keeping the main composer active."
@@ -117,6 +120,7 @@ impl App {
             "poke" => {
                 "/poke [on|off|status]\nPoke the model to resume when it has stopped with incomplete todos.\n\n\
                 Auto-poke now starts enabled by default, and Ctrl+P toggles it on/off.\n\
+                Set auto_poke = false under [features] in ~/.jcode/config.toml to start with it disabled.\n\
                 /poke or /poke on arms auto-poke and immediately pokes if work remains.\n\
                 /poke off disarms auto-poke and clears any queued poke follow-ups.\n\
                 /poke status shows whether auto-poke is currently armed.\n\
@@ -218,6 +222,11 @@ impl App {
             None => String::new(),
         };
         let help = help.replace("{resume_shortcut}", &resume_shortcut);
+        // Mac keyboards have no "Alt" key; show the ⌥ keycap instead.
+        let help = help.replace(
+            "Alt+",
+            &format!("{}+", jcode_tui_core::keybind::alt_label()),
+        );
         Some(help)
     }
 }

@@ -83,10 +83,15 @@ pub fn render_markdown_lazy(
                         _ => heading_color(),
                     };
 
+                    let underline = matches!(heading_level, Some(1) | Some(2));
                     let heading_spans: Vec<Span<'static>> = current_spans
                         .drain(..)
                         .map(|s| {
-                            Span::styled(s.content.to_string(), Style::default().fg(color).bold())
+                            let mut style = Style::default().fg(color).bold();
+                            if underline {
+                                style = style.underlined();
+                            }
+                            Span::styled(s.content.to_string(), style)
                         })
                         .collect();
                     lines.push(Line::from(heading_spans));
@@ -507,27 +512,16 @@ pub fn render_markdown_lazy(
                     }
                 } else {
                     ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    // Inline math must stay inline with the surrounding
+                    // sentence: image rendering is block-level, so even in
+                    // Image mode use the Unicode span. Standalone `$...$`
+                    // lines are already promoted to display math during
+                    // preprocessing and take the image path there.
                     match latex_mode {
                         LatexRenderingMode::None => current_spans.push(raw_math_inline_span(&math)),
-                        LatexRenderingMode::Unicode => current_spans.push(math_inline_span(&math)),
-                        LatexRenderingMode::Image
-                            if blockquote_depth == 0
-                                && list_stack.is_empty()
-                                && !in_definition_list
-                                && !in_footnote_definition =>
-                        {
-                            if let Some(image_lines) = latex_image_lines(&math, false, max_width) {
-                                flush_current_line_with_alignment(
-                                    &mut lines,
-                                    &mut current_spans,
-                                    None,
-                                );
-                                lines.extend(image_lines);
-                            } else {
-                                current_spans.push(math_inline_span(&math));
-                            }
+                        LatexRenderingMode::Unicode | LatexRenderingMode::Image => {
+                            current_spans.push(math_inline_span(&math));
                         }
-                        LatexRenderingMode::Image => current_spans.push(math_inline_span(&math)),
                     }
                 }
             }

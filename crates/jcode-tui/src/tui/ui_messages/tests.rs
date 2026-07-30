@@ -557,13 +557,15 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: Some("Inspect a debug frame".to_string()),
         end_to_end_ownership: Some(90),
+        ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some("Keep the agent aligned with the user's request".to_string()),
         understands_user_intent: Some(98),
+        ..Default::default()
     };
     let msg = DisplayMessage::todos(
         serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
@@ -576,7 +578,7 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
         .join("\n");
 
     assert!(
-        plain.contains("Hill climbability 95% · Ownership 90%"),
+        plain.contains("Closed feedback loop 95% · Ownership 90%"),
         "{plain}"
     );
     // Plan-level intent renders once, above the groups.
@@ -609,13 +611,15 @@ fn render_todos_message_uses_readable_semantic_colors() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: None,
         end_to_end_ownership: None,
+        ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some("Readable metadata".to_string()),
         understands_user_intent: Some(98),
+        ..Default::default()
     };
     let msg = DisplayMessage::todos(
         serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
@@ -653,9 +657,10 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: None,
         end_to_end_ownership: Some(90),
+        ..Default::default()
     }];
     let msg =
         DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
@@ -667,7 +672,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("Hill climbability 95%"), "{plain}");
+    assert!(plain.contains("Closed feedback loop 95%"), "{plain}");
     assert!(plain.contains("Ownership 90%"), "{plain}");
     assert!(
         lines.iter().all(|line| line.width() <= 38),
@@ -710,15 +715,16 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: Some("Inspect the rendered frame".to_string()),
         end_to_end_ownership: Some(92),
+        ..Default::default()
     }];
     let content = format!(
         "[todo] [tool timing: start=2026-07-13T19:51:50.261Z finish=2026-07-13T19:51:50.265Z duration=4ms] {}\n\nGoals:\n{}\n\n{}",
         serde_json::to_string_pretty(&todos).unwrap(),
         serde_json::to_string_pretty(&goals).unwrap(),
-        crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE
+        crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
         role: "tool".to_string(),
@@ -744,7 +750,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(!plain.contains("Todos"), "{plain}");
     assert!(plain.contains("todo rendering  ●"), "{plain}");
     assert!(
-        plain.contains("Hill climbability 95% · Ownership 92%"),
+        plain.contains("Closed feedback loop 95% · Ownership 92%"),
         "{plain}"
     );
     assert!(plain.contains("● Render the todo result · 92%"), "{plain}");
@@ -772,12 +778,13 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
     }];
     let before = crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(90),
+        closed_feedback_loop: Some(90),
         feedback_loop: Some("Inspect one frame".to_string()),
         end_to_end_ownership: None,
+        ..Default::default()
     };
     let after = crate::todo::TodoGoal {
-        hill_climbability: Some(98),
+        closed_feedback_loop: Some(98),
         feedback_loop: Some(
             "Render before and after fixtures and assert unchanged fields are absent".to_string(),
         ),
@@ -787,7 +794,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         before: Some(before),
         after: Some(after.clone()),
         fields: vec![
-            crate::todo::TodoGoalField::HillClimbability,
+            crate::todo::TodoGoalField::ClosedFeedbackLoop,
             crate::todo::TodoGoalField::FeedbackLoop,
         ],
     }];
@@ -796,7 +803,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         serde_json::to_string_pretty(&todos).unwrap(),
         serde_json::to_string_pretty(&vec![after]).unwrap(),
         serde_json::to_string_pretty(&updates).unwrap(),
-        crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
+        crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
     );
     let msg = DisplayMessage {
         role: "tool".to_string(),
@@ -820,7 +827,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         .join("\n");
 
     assert!(plain.contains("todo rendering  updated"), "{plain}");
-    assert!(plain.contains("Hill climbability 90% → 98%"), "{plain}");
+    assert!(plain.contains("Closed feedback loop 90% → 98%"), "{plain}");
     assert!(
         plain.contains(
             "Feedback · Render before and after fixtures and assert unchanged fields are absent"
@@ -849,6 +856,7 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
     let before = crate::todo::TodoPlan {
         user_intention: Some("Ship the plan-level intent gate".to_string()),
         understands_user_intent: Some(80),
+        ..Default::default()
     };
     let after = crate::todo::TodoPlan {
         understands_user_intent: Some(97),
@@ -958,6 +966,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         let plan = crate::todo::TodoPlan {
             user_intention: Some(intention.to_string()),
             understands_user_intent: Some(96),
+            ..Default::default()
         };
         let mut content = format!(
             "[todo] [tool timing: start=2026-07-13T19:51:50.261Z finish=2026-07-13T19:51:50.265Z duration=4ms] {}\n\nPlan:\n{}\n\nGoals:\n{}",
@@ -987,12 +996,13 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let initial = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            hill_climbability: Some(90),
+            closed_feedback_loop: Some(90),
             feedback_loop: Some(INITIAL_FEEDBACK.to_string()),
             end_to_end_ownership: None,
+            ..Default::default()
         },
         "Make a pelican riding a bike animation that clearly works in a browser",
-        Some(crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE),
+        Some(crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE),
         Some(crate::message::ToolCall {
             id: "call_initial_todo".to_string(),
             name: "todo".to_string(),
@@ -1012,9 +1022,10 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let revised = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            hill_climbability: Some(98),
+            closed_feedback_loop: Some(98),
             feedback_loop: Some(REVISED_FEEDBACK.to_string()),
             end_to_end_ownership: None,
+            ..Default::default()
         },
         REVISED_OBJECTIVE,
         None,
@@ -1043,7 +1054,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
 #[test]
 fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
     // This fixture is only the first todo retry emitted after the
-    // hill-climbability continuation. The eval stops here and deliberately does
+    // closed feedback loop continuation. The eval stops here and deliberately does
     // not depend on the model implementing or completing the visual task.
     const PROMPT: &str =
         "make the most visually appealing pelican on a bike animation with html and vanillia js";
@@ -1066,13 +1077,15 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("pelican-bike".to_string()),
-        hill_climbability: Some(98),
+        closed_feedback_loop: Some(98),
         feedback_loop: Some(FEEDBACK.to_string()),
         end_to_end_ownership: None,
+        ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some(OBJECTIVE.to_string()),
         understands_user_intent: Some(97),
+        ..Default::default()
     };
     let todo_output = format!(
         "{}\n\nPlan:\n{}\n\nGoals:\n{}",
@@ -1152,7 +1165,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("ship outcome".to_string()),
-        hill_climbability: Some(100),
+        closed_feedback_loop: Some(100),
         feedback_loop: Some("Run the complete workflow".to_string()),
         end_to_end_ownership: Some(80),
         ..Default::default()
@@ -2103,15 +2116,9 @@ fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage 
     }
 }
 
-fn first_discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage {
-    let mut message = discovery_message(content, input);
-    message.title = Some(crate::sponsors::DISCOVERY_DISCLOSURE_TAG.to_string());
-    message
-}
-
 #[test]
 fn render_tool_message_shows_discovery_browse_results_and_rationale() {
-    let msg = first_discovery_message(
+    let msg = discovery_message(
         "Discoverable tools in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nBrowse request ID: `11111111-2222-4333-8444-555555555555`",
         serde_json::json!({
             "action": "browse",
@@ -2126,18 +2133,14 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(plain.contains("1 result · payments"), "{plain}");
+    assert!(plain.contains("1 integration · payments"), "{plain}");
     assert!(plain.contains("why: the task needs test-mode"), "{plain}");
     assert!(plain.contains("agentcard"), "{plain}");
     assert!(plain.contains("prepaid virtual Visa cards"), "{plain}");
     assert!(plain.contains("agentcard.sh"), "{plain}");
     assert!(
-        plain.contains("Jcode partners with tool providers to make their tools discoverable"),
-        "{plain}"
-    );
-    assert!(
-        without_whitespace(&plain).contains("Learnmore:https://jcode.sh/discovery-tools"),
-        "{plain}"
+        !plain.contains("Listings are vetted"),
+        "discovery results must not render the disclosure notice: {plain}"
     );
     assert!(!plain.contains("sponsored result"), "{plain}");
     assert!(
@@ -2162,13 +2165,13 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
 }
 
 #[test]
-fn batched_discovery_renders_first_use_disclosure_inline_once() {
+fn batched_discovery_renders_without_disclosure_notice() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "--- [1] discover_tools ---\nDiscoverable tools in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nBrowse request ID: `11111111-2222-4333-8444-555555555555`\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
         duration_secs: None,
-        title: Some(crate::sponsors::DISCOVERY_DISCLOSURE_TAG.to_string()),
+        title: None,
         tool_data: Some(crate::message::ToolCall {
             id: "call_batch_discovery".to_string(),
             name: "batch".to_string(),
@@ -2195,13 +2198,10 @@ fn batched_discovery_renders_first_use_disclosure_inline_once() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("1 result · payments"), "{plain}");
-    assert_eq!(
-        plain
-            .matches("Jcode partners with tool providers to make their tools discoverable")
-            .count(),
-        1,
-        "the batched first-use notice must render exactly once: {plain}"
+    assert!(plain.contains("1 integration · payments"), "{plain}");
+    assert!(
+        !plain.contains("Listings are vetted"),
+        "batched discovery must not render the disclosure notice: {plain}"
     );
     assert!(
         !plain
@@ -2239,8 +2239,8 @@ fn render_tool_message_shows_selected_discovery_setup() {
     assert!(plain.contains("setup:"), "{plain}");
     assert!(plain.contains("agentcard-mcp@1.2.3"), "{plain}");
     assert!(
-        !plain.contains("Jcode partners with tool providers"),
-        "later discovery results must not repeat the first-use notice: {plain}"
+        !plain.contains("Listings are vetted"),
+        "discovery results must not render the disclosure notice: {plain}"
     );
 }
 
